@@ -1946,7 +1946,7 @@ public static class SuperPdfUtil
             OutScale = 2.0,
             Model = "RealESRGAN_x2plus", // 2x出力には2xモデルを使用 (x4plusで2x出力は内部で4x→2xとなり約4倍無駄)
             //Model = "RealESRGAN_x4plus_anime_6B",
-            Tile = 2048, // VRAM 16GB で余裕あり (tile=1024 時 7GB使用) → OOM時は1024に戻す
+            Tile = 0, // タイルなし=画像全体を一括処理 (オーバーヘッドゼロ) → OOM時は2048または1024に戻す
             Skip = options.SkipRealesrgan,
         };
 
