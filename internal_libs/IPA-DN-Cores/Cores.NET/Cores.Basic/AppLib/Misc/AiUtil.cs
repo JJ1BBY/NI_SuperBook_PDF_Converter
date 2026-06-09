@@ -3063,7 +3063,7 @@ public class AiUtilBasicSettings
 public class AiUtilRealEsrganPerformOption
 {
     public string Model = "RealESRGAN_x4plus";
-    public int Tile = 1024;
+    public int Tile = 2048; // Tile=0はVRAM共有メモリ使用でOOM、Tile=1024は未使用VRAM多すぎ、2048で75%(12GB/16GB)で安定
     public int Pad = 16;
     public double OutScale = 1.0;
     public bool Skip = false;
