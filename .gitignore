@@ -9,6 +9,9 @@ external_tools/
 # Claude Code memory
 .claude/
 
+# Local documents
+DN_SuperBook_Improvement_Guide.md
+
 # User-specific files
 *.rsuser
 *.suo
