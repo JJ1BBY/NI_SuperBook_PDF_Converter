@@ -250,8 +250,8 @@ public class ImageMagickUtil
 
         int totalPages = await GetPdfPageCountAsync(pdfPath, cancel);
 
-        // ページ数が少ない場合は並列化しない
-        int parallelism = Math.Max(1, Math.Min(2, Environment.ProcessorCount / 2));
+        // 500ページ以上は1並列固定 (1プロセス最大6GB × 2並列 = 12GB でRAMハング実績あり)
+        int parallelism = totalPages >= 500 ? 1 : Math.Max(1, Math.Min(2, Environment.ProcessorCount / 2));
         if (totalPages < parallelism * 8) parallelism = 1;
 
         if (parallelism <= 1)
