@@ -292,9 +292,10 @@ public class PdfYomitokuLib
             cmdList.Add("--lite");
         }
 
-        string cmdLine = "yomitoku " + cmdList._Combine(" ");
+        // activate 経由だと PATH が後続コマンドに反映されないため、yomitoku.exe を直接フルパスで呼ぶ
+        string cmdLine = @".\venv\Scripts\yomitoku.exe " + cmdList._Combine(" ");
 
-        await RunVEnvPythonCommandsAsync(cmdLine, options.TimeoutSecs * 1000, printTag: internalShortName, cancel: cancel);
+        await RunBatchCommandsDirectAsync(cmdLine, options.TimeoutSecs * 1000, printTag: internalShortName, cancel: cancel);
 
         if (options.Format == PdfYomitokuFormats.Pdf)
         {
