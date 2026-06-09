@@ -1936,6 +1936,7 @@ public static class SuperPdfUtil
             var aiOpt = new AiUtilRealEsrganPerformOption
             {
                 OutScale = 2.0,
+                Model = "RealESRGAN_x2plus", // 2x出力には2xモデルを使用 (x4plusで2x出力は内部で4x→2xとなり約4倍無駄)
                 //Model = "RealESRGAN_x4plus_anime_6B",
                 Skip = options.SkipRealesrgan,
             };
