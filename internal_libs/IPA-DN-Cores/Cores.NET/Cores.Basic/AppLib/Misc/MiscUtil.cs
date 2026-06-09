@@ -214,9 +214,18 @@ public class ImageMagickUtil
             pageRange = $"[0-{option.NumPages - 1}]";
         }
 
+        int estPages = (option.NumPages >= 1 && option.NumPages != int.MaxValue) ? option.NumPages : -1;
+        string estStr = estPages >= 0 ? $"{estPages}ページ" : "全ページ";
+        Con.WriteLine($"[ImageMagick] BMP展開開始: {estStr}, {PP.GetFileName(pdfPath)}");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
         var result = await RunMagickAsync(
             $"-density {option.Density} {(pdfPath + pageRange)._EnsureQuotation()} -resize {option.Width}x{option.Height} {bmpOptions}{dstStr}",
-            cancel: cancel);
+            cancel: cancel,
+            timeoutMsecs: 60 * 60 * 1000);  // 60分タイムアウト
+
+        var outFiles = (await Lfs.EnumDirectoryAsync(dstDir, false, cancel: cancel)).Count(x => x.IsFile && x.Name._IsExtensionMatch(ext));
+        Con.WriteLine($"[ImageMagick] BMP展開完了: {sw.Elapsed.TotalSeconds:F1}秒, {outFiles}枚出力, {PP.GetFileName(pdfPath)}");
     }
 
     // PDF の総ページ数を返す (magick identify を使用)
@@ -513,13 +522,13 @@ public class ImageMagickUtil
         return ret;
     }
 
-    public async Task<EasyExecResult> RunMagickAsync(string arguments, CancellationToken cancel = default)
+    public async Task<EasyExecResult> RunMagickAsync(string arguments, CancellationToken cancel = default, int timeoutMsecs = Timeout.Infinite)
     {
         Con.WriteLine($"[*Run*] {Options.MagickExePath} {arguments}");
 
         EasyExecResult ret = await EasyExec.ExecAsync(Options.MagickExePath, arguments, PP.GetDirectoryName(Options.MagickExePath),
             flags: ExecFlags.Default | ExecFlags.EasyPrintRealtimeStdOut | ExecFlags.EasyPrintRealtimeStdErr,
-            timeout: Timeout.Infinite, cancel: cancel, throwOnErrorExitCode: true,
+            timeout: timeoutMsecs, cancel: cancel, throwOnErrorExitCode: true,
             easyOutputMaxSize: Options.MaxStdOutBufferSize,
             inputEncoding: Options.Encoding, outputEncoding: Options.Encoding, errorEncoding: Options.Encoding);
 

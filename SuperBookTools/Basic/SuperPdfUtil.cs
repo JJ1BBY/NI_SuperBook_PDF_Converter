@@ -1877,7 +1877,18 @@ public static class SuperPdfUtil
 
         // Windows セキュリティブロック (Zone.Identifier) 解除 — 他PCからコピーしたPDFでmagick.exeがハングする問題を防ぐ
         string zoneFile = srcPdfPath + ":Zone.Identifier";
-        if (File.Exists(zoneFile)) File.Delete(zoneFile);
+        try
+        {
+            if (File.Exists(zoneFile))
+            {
+                File.Delete(zoneFile);
+                Con.WriteLine($"[Zone.Identifier] Removed security block: {srcPdfPath}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Con.WriteLine($"[Zone.Identifier] Warning: failed to remove '{zoneFile}': {ex.Message}");
+        }
 
         await Lfs.DeleteFileIfExistsAsync(dstPdfPath, raiseException: true, cancel: cancel);
 
