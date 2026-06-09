@@ -292,10 +292,18 @@ public class PdfYomitokuLib
             cmdList.Add("--lite");
         }
 
-        // activate 経由だと PATH が後続コマンドに反映されないため、yomitoku.exe を直接フルパスで呼ぶ
-        string cmdLine = @".\venv\Scripts\yomitoku.exe " + cmdList._Combine(" ");
+        // cmd.exe 経由だと stdin 汚染・stderr 未取得が発生するため、yomitoku.exe を直接起動する
+        string yomitokuExe = PP.Combine(this.YomiTokuPythonBaseDir, @"venv\Scripts\yomitoku.exe");
+        string yomitokuArgs = cmdList._Combine(" ");
 
-        await RunBatchCommandsDirectAsync(cmdLine, options.TimeoutSecs * 1000, printTag: internalShortName, cancel: cancel);
+        string yomitokuTag = internalShortName._IsFilled() ? ": " + internalShortName.Trim() : "";
+        string printTagMain = $"[YomiToku{yomitokuTag}]";
+
+        await EasyExec.ExecAsync(yomitokuExe, yomitokuArgs, this.YomiTokuPythonBaseDir,
+            flags: ExecFlags.Default | ExecFlags.EasyPrintRealtimeStdOut | ExecFlags.EasyPrintRealtimeStdErr,
+            timeout: options.TimeoutSecs * 1000, cancel: cancel, throwOnErrorExitCode: true,
+            easyOutputMaxSize: CoresConfig.DefaultAiUtilSettings.DefaultMaxStdOutBufferSize,
+            printTag: printTagMain);
 
         if (options.Format == PdfYomitokuFormats.Pdf)
         {
