@@ -295,7 +295,7 @@ public class PdfYomitokuLib
         // yomitoku.exe は venv 移動後に内部の Python パスが壊れるため、
         // venv\Scripts\python.exe -m yomitoku で直接呼び出す
         string pythonExe = PP.Combine(this.YomiTokuPythonBaseDir, @"venv\Scripts\python.exe");
-        string yomitokuArgs = "-m yomitoku " + cmdList._Combine(" ");
+        string yomitokuArgs = "-m yomitoku.cli.main " + cmdList._Combine(" ");
 
         string yomitokuTag = internalShortName._IsFilled() ? ": " + internalShortName.Trim() : "";
         string printTagMain = $"[YomiToku{yomitokuTag}]";
