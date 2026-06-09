@@ -1834,7 +1834,7 @@ public static class SuperPdfUtil
     public const int internalHighResImgWidth = 4960;
     public const int internalHighResImgHeight = 7016;
 
-    public static async Task<bool> PerformPdfAsync(string srcPdfPath, string dstPdfPath, SuperPerformPdfOptions? options = null, bool useOkFile = true, CancellationToken cancel = default)
+    public static async Task<bool> PerformPdfAsync(string srcPdfPath, string dstPdfPath, SuperPerformPdfOptions? options = null, bool useOkFile = true, AiUtilRealEsrganEngine? sharedRealesrgan = null, CancellationToken cancel = default)
     {
         if (srcPdfPath._IsSamei(dstPdfPath))
         {
@@ -1857,7 +1857,7 @@ public static class SuperPdfUtil
 
         Con.WriteLine($"[PerformPdfAsync]: Starting '{srcPdfPath}' -> '{dstPdfPath}' ...");
 
-        var result = await PerformPdfMainAsync(srcPdfPath, dstPdfPath, options, cancel: cancel);
+        var result = await PerformPdfMainAsync(srcPdfPath, dstPdfPath, options, sharedRealesrgan: sharedRealesrgan, cancel: cancel);
 
         result.Options = options;
 
@@ -1871,7 +1871,7 @@ public static class SuperPdfUtil
         return true;
     }
 
-    static async Task<SuperPdfResult> PerformPdfMainAsync(string srcPdfPath, string dstPdfPath, SuperPerformPdfOptions? options = null, CancellationToken cancel = default)
+    static async Task<SuperPdfResult> PerformPdfMainAsync(string srcPdfPath, string dstPdfPath, SuperPerformPdfOptions? options = null, AiUtilRealEsrganEngine? sharedRealesrgan = null, CancellationToken cancel = default)
     {
         options ??= new();
 
@@ -1941,22 +1941,28 @@ public static class SuperPdfUtil
         }
 
         // realesrgan で鮮明化
-        await using (var realesrgan = new AiUtilRealEsrganEngine(SuperBookExternalTools.Settings))
+        var aiOpt = new AiUtilRealEsrganPerformOption
         {
-            var aiOpt = new AiUtilRealEsrganPerformOption
-            {
-                OutScale = 2.0,
-                Model = "RealESRGAN_x2plus", // 2x出力には2xモデルを使用 (x4plusで2x出力は内部で4x→2xとなり約4倍無駄)
-                //Model = "RealESRGAN_x4plus_anime_6B",
-                Skip = options.SkipRealesrgan,
-            };
+            OutScale = 2.0,
+            Model = "RealESRGAN_x2plus", // 2x出力には2xモデルを使用 (x4plusで2x出力は内部で4x→2xとなり約4倍無駄)
+            //Model = "RealESRGAN_x4plus_anime_6B",
+            Skip = options.SkipRealesrgan,
+        };
 
-            string ext = ".bmp";
-            if (extractOptions.Format == ImageMagickExtractImageFormat.Png)
-            {
-                ext = ".png";
-            }
+        string ext = ".bmp";
+        if (extractOptions.Format == ImageMagickExtractImageFormat.Png)
+        {
+            ext = ".png";
+        }
 
+        if (sharedRealesrgan != null)
+        {
+            // 呼び出し元から渡された共有エンジンを使用 (複数PDF処理でサーバーを常駐させる)
+            await sharedRealesrgan.PerformAsync(pdf_extracted_dir2, ext, pdf_ai_result_dir, aiOpt, cancel: cancel);
+        }
+        else
+        {
+            await using var realesrgan = new AiUtilRealEsrganEngine(SuperBookExternalTools.Settings);
             await realesrgan.PerformAsync(pdf_extracted_dir2, ext, pdf_ai_result_dir, aiOpt, cancel: cancel);
         }
 

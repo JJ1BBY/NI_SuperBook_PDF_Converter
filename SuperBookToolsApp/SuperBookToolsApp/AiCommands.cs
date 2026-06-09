@@ -112,6 +112,9 @@ namespace SuperBookTools.App
 
             List<string> errorFilesList = new();
 
+            // RealESRGAN サーバーを全PDFで共有してモデルロードを1回にする
+            await using var sharedRealesrgan = new AiUtilRealEsrganEngine(SuperBookExternalTools.Settings);
+
             foreach (var src in srcFiles)
             {
                 currentNumber++;
@@ -122,7 +125,7 @@ namespace SuperBookTools.App
 
                 try
                 {
-                    if (await SuperPdfUtil.PerformPdfAsync(src.FullPath, dstPath, options) == false)
+                    if (await SuperPdfUtil.PerformPdfAsync(src.FullPath, dstPath, options, sharedRealesrgan: sharedRealesrgan) == false)
                     {
                         numSkip++;
                         $"<< {currentNumber} / {numTotal} >> '{src.FullPath}' Skip"._Error();
