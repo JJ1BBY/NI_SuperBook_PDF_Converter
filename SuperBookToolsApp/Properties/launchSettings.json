@@ -1,0 +1,11 @@
+{
+  "profiles": {
+    "SuperBookToolsApp": {
+      "commandName": "Project"
+    },
+    "Command - ConvertPdf": {
+      "commandName": "Project",
+      "commandLineArgs": "ConvertPdf"
+    }
+  }
+}
