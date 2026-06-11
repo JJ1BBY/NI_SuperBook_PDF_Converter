@@ -147,18 +147,18 @@ namespace SuperBookTools.App
                 "***"._Print();
                 ""._Print();
 
-                // reading_order の確認 (Enter = R = right2left / a = auto)
-                string? roInput = c.ReadLine("Reading order for md_paged (縦組み=right2left / 横組み=auto) [R/a]: ");
+                // reading_order の確認 (Enter = R = right2left 固定 / a = auto 自動判定)
+                string? roInput = c.ReadLine("Reading order for md_paged (right2left=右→左に固定/縦組み向け / auto=自動判定・誤判定の可能性あり) [R/a]: ");
                 string roTrimmed = (roInput ?? "")._NonNullTrim();
                 if (roTrimmed.StartsWith("a", StringComparison.OrdinalIgnoreCase))
                 {
                     mdPagedReadingOrder = "auto";
-                    "-> reading_order: auto (横組み) — 推論1回で全フォーマット生成"._Print();
+                    "-> reading_order: auto (読み順を自動判定。横組み等に有効だが誤判定の可能性あり)"._Print();
                 }
                 else
                 {
                     mdPagedReadingOrder = "right2left";
-                    "-> reading_order: right2left (縦組み) — 推論2回"._Print();
+                    "-> reading_order: right2left (読み順を右→左に固定。縦組み向け)"._Print();
                 }
                 ""._Print();
             }
