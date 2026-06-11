@@ -42,7 +42,10 @@ namespace SuperBookTools.App
             Path.Combine(Env.AppRootDir, @"_dummy.exe"),
             Path.Combine(Env.AppRootDir, @"_dummy.exe")));
 
-        public static readonly PdfYomitokuLib YomiToku = new PdfYomitokuLib(Path.Combine(Env.AppRootDir, @"..\external_tools\external_tools\image_tools\yomitoku"));
+        public static readonly PdfYomitokuLib YomiToku = new PdfYomitokuLib(
+            Path.Combine(Env.AppRootDir, @"..\external_tools\external_tools\image_tools\yomitoku"),
+            Path.Combine(Env.AppRootDir, @"..\external_tools\external_tools\image_tools\pandoc\pandoc.exe"),
+            Path.Combine(Env.AppRootDir, @"PythonScripts\yomitoku_multi_export.py"));
 
         public static readonly AiUtilBasicSettings Settings = new AiUtilBasicSettings
         {
@@ -52,6 +55,39 @@ namespace SuperBookTools.App
         public static readonly AiTask Task = new AiTask(Settings, FfMpeg);
 
         public const string Post_OCR_Dir = "Post_OCR_Dir";
+    }
+
+    public static class SuperBookAppConfig
+    {
+        public static readonly string TempRootPath;
+
+        static SuperBookAppConfig()
+        {
+            var configPath = System.IO.Path.Combine(Env.AppRootDir, "appsettings.json");
+            if (File.Exists(configPath))
+            {
+                try
+                {
+                    var json = File.ReadAllText(configPath);
+                    using var doc = System.Text.Json.JsonDocument.Parse(json);
+                    if (doc.RootElement.TryGetProperty("TempRootPath", out var val))
+                    {
+                        var str = val.GetString();
+                        if (!string.IsNullOrWhiteSpace(str))
+                        {
+                            TempRootPath = str;
+                            Con.WriteLine($"[Config] TempRootPath = \"{TempRootPath}\" (appsettings.json)");
+                            return;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Con.WriteLine($"[Config] appsettings.json 読み込み失敗 (既定値を使用): {ex.Message}");
+                }
+            }
+            TempRootPath = Env.MyLocalTempDir;
+        }
     }
 
     public static partial class Commands
@@ -66,7 +102,9 @@ namespace SuperBookTools.App
             {
                 new ConsoleParam("[srcDir]", ConsoleService.Prompt, "Source directory path: ", ConsoleService.EvalNotEmpty, null),
                 new ConsoleParam("dst", ConsoleService.Prompt, "Destination directory path: ", ConsoleService.EvalNotEmpty, null),
-                new ConsoleParam("ocr", ConsoleService.Prompt, "Perform Japanese High-Quality OCR? (Y/N): ", null, null),
+                // ConsoleService.Prompt は空入力を null (キャンセル) 扱いするため、
+                // Enter = デフォルト Y を実現するには ReadLine を直接呼ぶ
+                new ConsoleParam("ocr", (svc, p) => svc.ReadLine((string?)p ?? ""), "Perform Japanese High-Quality OCR? [Y/n/e=epub-only]: ", null, null),
             };
             ConsoleParamValueList vl = c.ParseCommandList(cmdName, str, args);
 
@@ -79,7 +117,11 @@ namespace SuperBookTools.App
             $"- Source Dir: \"{srcDir}\""._Print();
             $"- Destination Dir: \"{dstDir}\""._Print();
 
-            if (srcDir._IsSamei(dstDir))
+            string ocrRaw = vl["ocr"].StrValue._NonNullTrim();
+            bool epubOnly = ocrRaw.StartsWith("e", StringComparison.OrdinalIgnoreCase);
+            bool performOcr = !epubOnly && (ocrRaw._IsEmpty() || ocrRaw.StartsWith("y", StringComparison.OrdinalIgnoreCase));
+
+            if (!epubOnly && srcDir._IsSamei(dstDir))
             {
                 throw new CoresException("srcDir must not be same to dstDir.");
             }
@@ -88,82 +130,122 @@ namespace SuperBookTools.App
 
             SuperPerformPdfOptions options = new SuperPerformPdfOptions {/* MaxPagesForDebug = 120, SaveDebugPng = true, SkipRealesrgan = true */ };
 
-            bool performOcr = vl["ocr"].BoolValue;
+            string mdPagedReadingOrder = "right2left"; // デフォルト: 縦書き
 
-            if (performOcr)
+            if (performOcr || epubOnly)
             {
                 ""._Print();
                 "***"._Print();
-                $"The \"ocr\" option is enabled. This OCR feature uses \"YomiKaku\" AI engine published by kotaro.kinoshita-san. Plesae read the https://github.com/kotaro-kinoshita/yomitoku/blob/cba0a134e0d2ad3bfdce163231b3cb91de07928e/README.md license document."._Print();
+                if (performOcr)
+                {
+                    $"The \"ocr\" option is enabled. This OCR feature uses \"YomiKaku\" AI engine published by kotaro.kinoshita-san. Plesae read the https://github.com/kotaro-kinoshita/yomitoku/blob/cba0a134e0d2ad3bfdce163231b3cb91de07928e/README.md license document."._Print();
+                }
+                else
+                {
+                    "EPUB only mode: Skipping PDF processing and OCR. Regenerating EPUB from existing md_paged."._Print();
+                }
                 "***"._Print();
+                ""._Print();
+
+                // reading_order の確認 (Enter = R = right2left / a = auto)
+                string? roInput = c.ReadLine("Reading order for md_paged (縦組み=right2left / 横組み=auto) [R/a]: ");
+                string roTrimmed = (roInput ?? "")._NonNullTrim();
+                if (roTrimmed.StartsWith("a", StringComparison.OrdinalIgnoreCase))
+                {
+                    mdPagedReadingOrder = "auto";
+                    "-> reading_order: auto (横組み) — 推論1回で全フォーマット生成"._Print();
+                }
+                else
+                {
+                    mdPagedReadingOrder = "right2left";
+                    "-> reading_order: right2left (縦組み) — 推論2回"._Print();
+                }
                 ""._Print();
             }
 
-            var srcFiles = (await Lfs.EnumDirectoryAsync(srcDir, true)).Where(x => x.IsFile && x.Name.StartsWith("_") == false && x.Name._IsExtensionMatch(".pdf")).OrderBy(x => x.FullPath, StrCmpi)._Shuffle().ToList();
-
-            int numTotal = srcFiles.Count();
-            int numOk = 0;
-            int numError = 0;
-            int numSkip = 0;
-
-            $"Total {numTotal} Files"._Error();
-
-            int currentNumber = 0;
-
-            List<string> errorFilesList = new();
-
-            // RealESRGAN サーバーを全PDFで共有してモデルロードを1回にする
-            await using var sharedRealesrgan = new AiUtilRealEsrganEngine(SuperBookExternalTools.Settings);
-
-            foreach (var src in srcFiles)
+            if (!epubOnly)
             {
-                currentNumber++;
-                string relativePath = PP.GetRelativeFileName(src.FullPath, srcDir);
-                string dstPath = PP.Combine(dstDir, relativePath);
+                var srcFiles = (await Lfs.EnumDirectoryAsync(srcDir, true)).Where(x => x.IsFile && x.Name.StartsWith("_") == false && x.Name._IsExtensionMatch(".pdf")).OrderBy(x => x.FullPath, StrCmpi)._Shuffle().ToList();
 
-                $"<< {currentNumber} / {numTotal} >> '{src.FullPath}' Start"._Error();
+                int numTotal = srcFiles.Count();
+                int numOk = 0;
+                int numError = 0;
+                int numSkip = 0;
 
-                try
+                $"Total {numTotal} Files"._Error();
+
+                int currentNumber = 0;
+
+                List<string> errorFilesList = new();
+
+                // RealESRGAN サーバーを全PDFで共有してモデルロードを1回にする
+                await using var sharedRealesrgan = new AiUtilRealEsrganEngine(SuperBookExternalTools.Settings);
+
+                foreach (var src in srcFiles)
                 {
-                    if (await SuperPdfUtil.PerformPdfAsync(src.FullPath, dstPath, options, sharedRealesrgan: sharedRealesrgan) == false)
+                    currentNumber++;
+                    string relativePath = PP.GetRelativeFileName(src.FullPath, srcDir);
+                    string dstPath = PP.Combine(dstDir, relativePath);
+
+                    $"<< {currentNumber} / {numTotal} >> '{src.FullPath}' Start"._Error();
+
+                    try
                     {
-                        numSkip++;
-                        $"<< {currentNumber} / {numTotal} >> '{src.FullPath}' Skip"._Error();
+                        if (await SuperPdfUtil.PerformPdfAsync(src.FullPath, dstPath, options, sharedRealesrgan: sharedRealesrgan) == false)
+                        {
+                            numSkip++;
+                            $"<< {currentNumber} / {numTotal} >> '{src.FullPath}' Skip"._Error();
+                        }
+                        else
+                        {
+                            numOk++;
+                            $"<< {currentNumber} / {numTotal} >> '{src.FullPath}' OK"._Error();
+                        }
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        numOk++;
-                        $"<< {currentNumber} / {numTotal} >> '{src.FullPath}' OK"._Error();
+                        Con.WriteLine($"<< {currentNumber} / {numTotal} >> Error: {src.FullPath} -> {dstPath}");
+                        ex._Error();
+                        errorFilesList.Add(src.FullPath);
+                        numError++;
                     }
                 }
-                catch (Exception ex)
+
+                if (errorFilesList.Count >= 1)
                 {
-                    Con.WriteLine($"<< {currentNumber} / {numTotal} >> Error: {src.FullPath} -> {dstPath}");
-                    ex._Error();
-                    errorFilesList.Add(src.FullPath);
-                    numError++;
+                    $"--- Error files ---"._Error();
+                    foreach (var errFile in errorFilesList)
+                    {
+                        $"- {errFile}"._Error();
+                    }
                 }
+
+                $"\n\n<< ConvertPdf Result >>\nnumTotal = {numTotal}, numSkip = {numSkip}, numOk = {numOk}, numError = {numError}\n\n"._Error();
             }
 
             if (performOcr)
             {
                 Con.WriteLine("Performing Japanese OCR started ...");
 
-                await SuperBookExternalTools.YomiToku.PerformOcrDirAsync(dstDir, PP.Combine(dstDir, SuperBookExternalTools.Post_OCR_Dir), SuperBookExternalTools.Post_OCR_Dir);
+                await SuperBookExternalTools.YomiToku.PerformOcrDirAsync(dstDir, PP.Combine(dstDir, SuperBookExternalTools.Post_OCR_Dir), SuperBookExternalTools.Post_OCR_Dir, mdPagedReadingOrder);
 
                 Con.WriteLine("Performing Japanese OCR completed.");
             }
-
-            if (errorFilesList.Count >= 1)
+            else if (epubOnly)
             {
-                $"--- Error files ---"._Error();
-                foreach (var errFile in errorFilesList)
-                {
-                    $"- {errFile}"._Error();
-                }
-            }
+                Con.WriteLine("EPUB-only generation started ...");
 
-            $"\n\n<< ConvertPdf Result >>\nnumTotal = {numTotal}, numSkip = {numSkip}, numOk = {numOk}, numError = {numError}\n\n"._Error();
+                string postOcrDir = PP.Combine(dstDir, SuperBookExternalTools.Post_OCR_Dir);
+                string epubDir = PP.Combine(postOcrDir, "epub");
+                string mdPagedDir = PP.Combine(postOcrDir, "md_paged");
+
+                await SuperBookExternalTools.YomiToku.ConvertMdPagedDirToEpubAsync(
+                    mdPagedDir,
+                    epubDir,
+                    rotateImagesLeft: mdPagedReadingOrder._IsSamei("right2left"));
+
+                Con.WriteLine("EPUB-only generation completed.");
+            }
 
             return 0;
         }

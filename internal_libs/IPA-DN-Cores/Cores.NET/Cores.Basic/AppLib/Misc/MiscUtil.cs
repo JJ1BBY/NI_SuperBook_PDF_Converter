@@ -132,6 +132,7 @@ public class ImageMagickExtractImageOption
     public int Density = 300;
     public ImageMagickExtractImageFormat Format = ImageMagickExtractImageFormat.Bmp;
     public int NumPages = int.MaxValue;
+    public int TimeoutSecs = 3600; // ページ数連動で上書きされる
 }
 
 public class ImageMagickBuildPdfOption
@@ -222,7 +223,7 @@ public class ImageMagickUtil
         var result = await RunMagickAsync(
             $"-density {option.Density} {(pdfPath + pageRange)._EnsureQuotation()} -resize {option.Width}x{option.Height} {bmpOptions}{dstStr}",
             cancel: cancel,
-            timeoutMsecs: 60 * 60 * 1000);  // 60分タイムアウト
+            timeoutMsecs: option.TimeoutSecs * 1000);
 
         var outFiles = (await Lfs.EnumDirectoryAsync(dstDir, false, cancel: cancel)).Count(x => x.IsFile && x.Name._IsExtensionMatch(ext));
         Con.WriteLine($"[ImageMagick] BMP展開完了: {sw.Elapsed.TotalSeconds:F1}秒, {outFiles}枚出力, {PP.GetFileName(pdfPath)}");

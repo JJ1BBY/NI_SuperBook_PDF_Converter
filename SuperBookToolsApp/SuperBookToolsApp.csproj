@@ -84,6 +84,15 @@
     <Folder Include="ResourceRoot\Test\" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="PythonScripts\**\*.py">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
   <Import Project="..\SuperBookTools\SuperBookTools.projitems" Label="Shared" />
 
   <ProjectExtensions><VisualStudio><UserProperties properties_4launchsettings_1json__JsonSchema="" /></VisualStudio></ProjectExtensions>
