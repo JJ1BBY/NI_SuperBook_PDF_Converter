@@ -2549,8 +2549,8 @@ public static class SuperPdfUtil
         // 1ワーカーはフル解像度 Rgba32 画像を2〜3枚保持するため約600MB/ワーカーで見積もる。
         long cpuPipelineRamBudget = (long)(GC.GetGCMemoryInfo().TotalAvailableMemoryBytes * 0.40);
         int maxCpu = (int)Math.Clamp(
-            Math.Min(Env.NumCpus - 2, cpuPipelineRamBudget / (600L * 1024 * 1024)),
-            2, 8);
+            Math.Min((int)(Env.NumCpus * 0.8), cpuPipelineRamBudget / (600L * 1024 * 1024)),
+            2, Env.NumCpus);
         Con.WriteLine($"[CPU Pipeline] maxCpu={maxCpu} (cores={Env.NumCpus}, ramBudget={cpuPipelineRamBudget / (1024 * 1024)}MB)");
 
         // 抽出された画像の上下左右 0.5% をトリミングする (スキャンで黒枠などが映っている場合があるため)
