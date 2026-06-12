@@ -53,6 +53,63 @@ import re
 import sys
 import time
 
+
+def _merge_close_figures(figures, gap_threshold):
+    """近接する figure bbox を繰り返しマージして1つにまとめる。
+
+    x / y 両方向のギャップが gap_threshold px 以下の場合に隣接とみなし、
+    それらを union bbox で統合する。チェーン (A-B, B-C で A-C が遠くても統合)
+    になるよう変化がなくなるまで繰り返す。
+    """
+    if len(figures) <= 1:
+        return figures
+
+    changed = True
+    pool = list(figures)
+
+    while changed:
+        changed = False
+        merged = []
+        used = [False] * len(pool)
+
+        for i in range(len(pool)):
+            if used[i]:
+                continue
+            ax1, ay1, ax2, ay2 = pool[i].box
+            combined_paragraphs = list(pool[i].paragraphs)
+            base_order = pool[i].order
+
+            for j in range(i + 1, len(pool)):
+                if used[j]:
+                    continue
+                bx1, by1, bx2, by2 = pool[j].box
+                x_gap = max(0, max(ax1, bx1) - min(ax2, bx2))
+                y_gap = max(0, max(ay1, by1) - min(ay2, by2))
+                if x_gap <= gap_threshold and y_gap <= gap_threshold:
+                    ax1, ay1 = min(ax1, bx1), min(ay1, by1)
+                    ax2, ay2 = max(ax2, bx2), max(ay2, by2)
+                    combined_paragraphs.extend(pool[j].paragraphs)
+                    if base_order is None or (
+                        pool[j].order is not None and pool[j].order < base_order
+                    ):
+                        base_order = pool[j].order
+                    used[j] = True
+                    changed = True
+
+            merged.append(
+                pool[i].model_copy(
+                    update={
+                        "box": [ax1, ay1, ax2, ay2],
+                        "paragraphs": combined_paragraphs,
+                        "order": base_order,
+                    }
+                )
+            )
+
+        pool = merged
+
+    return pool
+
 SUPPORTED_FORMATS = ["md", "html", "json", "pdf"]
 
 
@@ -121,6 +178,7 @@ def main():
     )
 
     dpi = int(job.get("dpi", 200))
+    merge_gap = int(job.get("merge_figure_gap", 0))
 
     if src_path.suffix[1:].lower() == "pdf":
         imgs = load_pdf(src_path, dpi=dpi)
@@ -146,6 +204,16 @@ def main():
         start = time.time()
 
         result, _, _ = analyzer(img)
+
+        if merge_gap > 0 and len(result.figures) > 1:
+            original_count = len(result.figures)
+            merged_figures = _merge_close_figures(result.figures, merge_gap)
+            if len(merged_figures) < original_count:
+                print(
+                    f"  [figure_merge] page {page_no}: {original_count} → {len(merged_figures)} figures (gap={merge_gap}px)",
+                    flush=True,
+                )
+                result = result.model_copy(update={"figures": merged_figures})
 
         for task in tasks:
             fmt = task["format"]
