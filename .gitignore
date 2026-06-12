@@ -6,6 +6,9 @@
 # External tools (large binaries, not tracked in git)
 external_tools/
 
+# Local environment overrides (not committed to git)
+**/appsettings.local.json
+
 # Claude Code memory
 .claude/
 

@@ -67,34 +67,37 @@ namespace SuperBookTools.App
             TempRootPath = Env.MyLocalTempDir;
             RealEsrganTile = 0;
 
-            var configPath = System.IO.Path.Combine(Env.AppRootDir, "appsettings.json");
-            if (!File.Exists(configPath)) return;
-
-            try
+            foreach (var fileName in new[] { "appsettings.json", "appsettings.local.json" })
             {
-                var json = File.ReadAllText(configPath);
-                using var doc = System.Text.Json.JsonDocument.Parse(json);
+                var configPath = System.IO.Path.Combine(Env.AppRootDir, fileName);
+                if (!File.Exists(configPath)) continue;
 
-                if (doc.RootElement.TryGetProperty("TempRootPath", out var val))
+                try
                 {
-                    var str = val.GetString();
-                    if (!string.IsNullOrWhiteSpace(str))
+                    var json = File.ReadAllText(configPath);
+                    using var doc = System.Text.Json.JsonDocument.Parse(json);
+
+                    if (doc.RootElement.TryGetProperty("TempRootPath", out var val))
                     {
-                        TempRootPath = str;
-                        Con.WriteLine($"[Config] TempRootPath = \"{TempRootPath}\" (appsettings.json)");
+                        var str = val.GetString();
+                        if (!string.IsNullOrWhiteSpace(str))
+                        {
+                            TempRootPath = str;
+                            Con.WriteLine($"[Config] TempRootPath = \"{TempRootPath}\" ({fileName})");
+                        }
+                    }
+
+                    if (doc.RootElement.TryGetProperty("RealEsrganTile", out var tileVal)
+                        && tileVal.TryGetInt32(out var tileInt) && tileInt > 0)
+                    {
+                        RealEsrganTile = tileInt;
+                        Con.WriteLine($"[Config] RealEsrganTile = {RealEsrganTile} ({fileName})");
                     }
                 }
-
-                if (doc.RootElement.TryGetProperty("RealEsrganTile", out var tileVal)
-                    && tileVal.TryGetInt32(out var tileInt) && tileInt > 0)
+                catch (Exception ex)
                 {
-                    RealEsrganTile = tileInt;
-                    Con.WriteLine($"[Config] RealEsrganTile = {RealEsrganTile} (appsettings.json)");
+                    Con.WriteLine($"[Config] {fileName} 読み込み失敗 (スキップ): {ex.Message}");
                 }
-            }
-            catch (Exception ex)
-            {
-                Con.WriteLine($"[Config] appsettings.json 読み込み失敗 (既定値を使用): {ex.Message}");
             }
         }
     }
