@@ -189,6 +189,9 @@ def process_dir(upsampler, face_enhancer, args, input_dir, output_dir):
 
         print(f"  [VRAM after ] {_vram_str()}", file=sys.stderr, flush=True)
 
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         save_path = os.path.join(output_dir, imgname + ext)
         write_q.put((save_path, output, os.path.basename(path), imgname + ext))
 
