@@ -99,31 +99,15 @@ def load_model(args):
         )
 
     import torch
-    import numpy as np
 
     # cudnn benchmark: 固定サイズ入力に対し最速カーネルを自動選択
     if torch.cuda.is_available():
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
 
-    # torch.inductor のコンパイルキャッシュを永続化 (2回目以降の起動で再コンパイル不要)
-    _cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.torch_compile_cache')
-    os.makedirs(_cache_dir, exist_ok=True)
-    os.environ.setdefault('TORCHINDUCTOR_CACHE_DIR', _cache_dir)
-
-    # torch.compile: conv+活性化+残差加算を1カーネルに融合し VRAM 往復を削減
-    # SERVER_READY 送信前にウォームアップ推論を実行しコンパイルを完了させる
-    # triton-windows が未導入の環境では自動的に eager モードにフォールバック
-    try:
-        upsampler.model = torch.compile(upsampler.model, mode="max-autotune")
-        print("  [torch.compile] enabled (max-autotune)", file=sys.stderr, flush=True)
-        tile_sz = args.tile if args.tile > 0 else 512
-        warmup_img = np.zeros((tile_sz, tile_sz, 3), dtype=np.uint8)
-        print(f"  [torch.compile] warmup ({tile_sz}x{tile_sz})...", file=sys.stderr, flush=True)
-        upsampler.enhance(warmup_img, outscale=args.outscale)
-        print("  [torch.compile] warmup done", file=sys.stderr, flush=True)
-    except Exception as e:
-        print(f"  [torch.compile] unavailable, using eager mode: {e}", file=sys.stderr, flush=True)
+    # torch.compile は Windows + PyTorch nightly では tile_process 内の
+    # except RuntimeError が LoweringException を捕捉できず output_tile 未定義になるため無効化
+    print("  [torch.compile] disabled (Windows/Triton incompatibility)", file=sys.stderr, flush=True)
 
     device_name = "CUDA:" + torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU (CUDA unavailable!)"
     print(f"  [Device] {device_name}, VRAM={torch.cuda.get_device_properties(0).total_memory // 1024**2}MB" if torch.cuda.is_available() else f"  [Device] {device_name}", file=sys.stderr, flush=True)
