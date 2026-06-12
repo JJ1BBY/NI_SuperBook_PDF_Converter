@@ -107,7 +107,6 @@ def load_model(args):
 
     # torch.compile は Windows + PyTorch nightly では tile_process 内の
     # except RuntimeError が LoweringException を捕捉できず output_tile 未定義になるため無効化
-    print("  [torch.compile] disabled (Windows/Triton incompatibility)", file=sys.stderr, flush=True)
 
     device_name = "CUDA:" + torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU (CUDA unavailable!)"
     print(f"  [Device] {device_name}, VRAM={torch.cuda.get_device_properties(0).total_memory // 1024**2}MB" if torch.cuda.is_available() else f"  [Device] {device_name}", file=sys.stderr, flush=True)
