@@ -60,33 +60,42 @@ namespace SuperBookTools.App
     public static class SuperBookAppConfig
     {
         public static readonly string TempRootPath;
+        public static readonly int RealEsrganTile; // 0 = AiUtilRealEsrganPerformOption の既定値 (2048) を使用
 
         static SuperBookAppConfig()
         {
+            TempRootPath = Env.MyLocalTempDir;
+            RealEsrganTile = 0;
+
             var configPath = System.IO.Path.Combine(Env.AppRootDir, "appsettings.json");
-            if (File.Exists(configPath))
+            if (!File.Exists(configPath)) return;
+
+            try
             {
-                try
+                var json = File.ReadAllText(configPath);
+                using var doc = System.Text.Json.JsonDocument.Parse(json);
+
+                if (doc.RootElement.TryGetProperty("TempRootPath", out var val))
                 {
-                    var json = File.ReadAllText(configPath);
-                    using var doc = System.Text.Json.JsonDocument.Parse(json);
-                    if (doc.RootElement.TryGetProperty("TempRootPath", out var val))
+                    var str = val.GetString();
+                    if (!string.IsNullOrWhiteSpace(str))
                     {
-                        var str = val.GetString();
-                        if (!string.IsNullOrWhiteSpace(str))
-                        {
-                            TempRootPath = str;
-                            Con.WriteLine($"[Config] TempRootPath = \"{TempRootPath}\" (appsettings.json)");
-                            return;
-                        }
+                        TempRootPath = str;
+                        Con.WriteLine($"[Config] TempRootPath = \"{TempRootPath}\" (appsettings.json)");
                     }
                 }
-                catch (Exception ex)
+
+                if (doc.RootElement.TryGetProperty("RealEsrganTile", out var tileVal)
+                    && tileVal.TryGetInt32(out var tileInt) && tileInt > 0)
                 {
-                    Con.WriteLine($"[Config] appsettings.json 読み込み失敗 (既定値を使用): {ex.Message}");
+                    RealEsrganTile = tileInt;
+                    Con.WriteLine($"[Config] RealEsrganTile = {RealEsrganTile} (appsettings.json)");
                 }
             }
-            TempRootPath = Env.MyLocalTempDir;
+            catch (Exception ex)
+            {
+                Con.WriteLine($"[Config] appsettings.json 読み込み失敗 (既定値を使用): {ex.Message}");
+            }
         }
     }
 

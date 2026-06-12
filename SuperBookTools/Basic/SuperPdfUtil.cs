@@ -2582,6 +2582,8 @@ public static class SuperPdfUtil
             //Model = "RealESRGAN_x4plus_anime_6B",
             Skip = options.SkipRealesrgan,
         };
+        if (SuperBookAppConfig.RealEsrganTile > 0)
+            aiOpt.Tile = SuperBookAppConfig.RealEsrganTile;
 
         string ext = ".bmp";
         if (extractOptions.Format == ImageMagickExtractImageFormat.Png)
