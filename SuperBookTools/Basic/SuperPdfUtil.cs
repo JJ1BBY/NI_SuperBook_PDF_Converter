@@ -2545,28 +2545,34 @@ public static class SuperPdfUtil
             throw new CoresException($"[ENOSPC] PDF展開中にディスク容量不足が発生しました。処理を即時中断します。 File: '{srcPdfPath}'", ex);
         }
 
+        // CPU後処理ステージ (deskew/色調整/最終出力/トリム) の並列度を物理メモリ・コア数から動的に決定。
+        // 1ワーカーはフル解像度 Rgba32 画像を2〜3枚保持するため約600MB/ワーカーで見積もる。
+        long cpuPipelineRamBudget = (long)(GC.GetGCMemoryInfo().TotalAvailableMemoryBytes * 0.40);
+        int maxCpu = (int)Math.Clamp(
+            Math.Min(Env.NumCpus - 2, cpuPipelineRamBudget / (600L * 1024 * 1024)),
+            2, 8);
+        Con.WriteLine($"[CPU Pipeline] maxCpu={maxCpu} (cores={Env.NumCpus}, ramBudget={cpuPipelineRamBudget / (1024 * 1024)}MB)");
+
         // 抽出された画像の上下左右 0.5% をトリミングする (スキャンで黒枠などが映っている場合があるため)
-        var bmpFiles = (await Lfs.EnumDirectoryAsync(pdf_extracted_dir, cancel: cancel)).Where(x => x.IsFile && x.Name._IsExtensionMatch(".bmp")).OrderBy(x => x.Name, StrCmpi);
-
-        foreach (var bmpFile in bmpFiles)
+        var bmpFileList = (await Lfs.EnumDirectoryAsync(pdf_extracted_dir, cancel: cancel)).Where(x => x.IsFile && x.Name._IsExtensionMatch(".bmp")).OrderBy(x => x.Name, StrCmpi).ToList();
+        var trimSemaphore = new SemaphoreSlim(maxCpu, maxCpu);
+        await Task.WhenAll(bmpFileList.Select(async bmpFile =>
         {
-            using var srcImage = await SixLabors.ImageSharp.Image.LoadAsync<Rgb24>(bmpFile.FullPath, cancellationToken: cancel);
-
-            if (srcImage.Width >= 10 && srcImage.Height >= 10)
+            await trimSemaphore.WaitAsync(cancel);
+            try
             {
-                int marginWidth = (int)((double)srcImage.Width * 0.005);
-                int marginHeight = (int)((double)srcImage.Height * 0.005);
-
-                var rect = new Rectangle(marginWidth, marginHeight, srcImage.Width - marginWidth * 2, srcImage.Height - marginHeight * 2);
-
-                srcImage.Mutate(ctx =>
+                using var srcImage = await SixLabors.ImageSharp.Image.LoadAsync<Rgb24>(bmpFile.FullPath, cancellationToken: cancel);
+                if (srcImage.Width >= 10 && srcImage.Height >= 10)
                 {
-                    ctx.Crop(rect);
-                });
-
-                await srcImage.SaveAsBmpAsync(PP.Combine(pdf_extracted_dir2, PP.GetFileName(bmpFile.FullPath)), cancellationToken: cancel);
+                    int marginWidth = (int)((double)srcImage.Width * 0.005);
+                    int marginHeight = (int)((double)srcImage.Height * 0.005);
+                    var rect = new Rectangle(marginWidth, marginHeight, srcImage.Width - marginWidth * 2, srcImage.Height - marginHeight * 2);
+                    srcImage.Mutate(ctx => ctx.Crop(rect));
+                    await srcImage.SaveAsBmpAsync(PP.Combine(pdf_extracted_dir2, PP.GetFileName(bmpFile.FullPath)), cancellationToken: cancel);
+                }
             }
-        }
+            finally { trimSemaphore.Release(); }
+        }));
 
         // realesrgan で鮮明化
         var aiOpt = new AiUtilRealEsrganPerformOption
@@ -2598,7 +2604,7 @@ public static class SuperPdfUtil
         PnOcrLibBookMetaData? result;
         try
         {
-            result = await PerformPagesYohakuAsync(pdf_ai_result_dir, pdf_adjusted_dir, pdf_tmp_dir, options.MarginPercent, Math.Max(1, Math.Min(2, Env.NumCpus)), maxPagesForDebug: options.MaxPagesForDebug, saveDebugPng: options.SaveDebugPng, srcPdfPathForLogging: srcPdfPath);
+            result = await PerformPagesYohakuAsync(pdf_ai_result_dir, pdf_adjusted_dir, pdf_tmp_dir, options.MarginPercent, maxCpu, maxPagesForDebug: options.MaxPagesForDebug, saveDebugPng: options.SaveDebugPng, srcPdfPathForLogging: srcPdfPath);
         }
         catch (Exception ex) when (IsDiskFullException(ex))
         {
@@ -2795,7 +2801,7 @@ public static class SuperPdfUtil
 
                 // deskew後ファイルを tmpDir に保存
                 string tempFilePath = PP.Combine(tmpDir, $"deskew_{page.PageNumber:D4}.png");
-                await deskewedImage.SaveAsync(tempFilePath, new PngEncoder());
+                await deskewedImage.SaveAsync(tempFilePath, new PngEncoder { CompressionLevel = PngCompressionLevel.BestSpeed });
 
                 // カラー統計情報抽出
                 var stats = CalculateColorStats(deskewedImage);
@@ -2905,7 +2911,7 @@ public static class SuperPdfUtil
                 page.FilePathColorAdj = colorAdjustedFilePath;
                 try
                 {
-                    await deskewedImage.SaveAsync(colorAdjustedFilePath, new PngEncoder());
+                    await deskewedImage.SaveAsync(colorAdjustedFilePath, new PngEncoder { CompressionLevel = PngCompressionLevel.BestSpeed });
                 }
                 catch (Exception ex) when (IsDiskFullException(ex))
                 {
@@ -3074,7 +3080,7 @@ public static class SuperPdfUtil
                 string dstPath = PP.Combine(dstDir, dstFileName);
                 try
                 {
-                    await finalImg.SaveAsync(dstPath, new PngEncoder());
+                    await finalImg.SaveAsync(dstPath, new PngEncoder { CompressionLevel = PngCompressionLevel.BestSpeed });
                 }
                 catch (Exception ex) when (IsDiskFullException(ex))
                 {
@@ -3189,36 +3195,38 @@ public static class SuperPdfUtil
     /// </summary>
     private static async Task<SixLabors.ImageSharp.Image<Rgba32>> DeskewImageWithOpenCvAsync(SixLabors.ImageSharp.Image<Rgba32> src)
     {
-        // 傾き角度を検出
         string otsuImgTmpPngPath = await Lfs.GenerateUniqueTempFilePathAsync("deskew", ".png");
 
-        // 検知用画像は大津 2 値化した結果とする
-        using var otsuImg = PnOcrLib.PerformOtsuForPaperPage(src);
+        // 角度検出は長辺1920pxに縮小したコピーで行い、Otsu二値化・PNG保存・magick解析コストを削減。
+        // 回転補正自体はフル解像度の src に対して行うため精度は維持される。
+        int detectSize = 1920;
+        double scaleDown = Math.Min(1.0, (double)detectSize / Math.Max(src.Width, src.Height));
+        using var smallSrc = src.Clone(ctx => ctx.Resize(
+            Math.Max(1, (int)(src.Width * scaleDown)),
+            Math.Max(1, (int)(src.Height * scaleDown)),
+            KnownResamplers.Box));
 
+        using var otsuImg = PnOcrLib.PerformOtsuForPaperPage(smallSrc);
         await otsuImg.SaveAsPngAsync(otsuImgTmpPngPath);
 
         try
         {
-            // 2 値化されたイメージを用いて傾きを検出
-            double angle = await SuperBookExternalTools.ImageMagick.GetDeskewRotateDegreeAsync(otsuImgTmpPngPath, -1);
+            // 画像は既に ≤1920px なので GetDeskewRotateDegreeAsync の内部 -resize は実質 no-op
+            double angle = await SuperBookExternalTools.ImageMagick.GetDeskewRotateDegreeAsync(otsuImgTmpPngPath);
+            Con.WriteLine($"[Deskew] angle={angle:F4}°");
 
             if (angle._IsNearlyZero())
             {
-                // 回転なし
                 return src;
             }
 
             angle = -angle;
 
-            // ImageSharp -> OpenCvSharp(Mat) に変換 (修正)
             using var mat = ImageSharpToMat(src);
-
-            // 回転行列を使って回転補正
             Point2f center = new Point2f(mat.Width / 2.0f, mat.Height / 2.0f);
             using Mat rotMat = Cv2.GetRotationMatrix2D(center, angle, 1.0);
 
             using var rotated = new Mat();
-            // 修正: BorderTypes.Constant + Scalar.White で背景を白に
             Cv2.WarpAffine(
                 mat,
                 rotated,
@@ -3226,13 +3234,10 @@ public static class SuperPdfUtil
                 new OpenCvSharp.Size(mat.Width, mat.Height),
                 InterpolationFlags.Linear,
                 BorderTypes.Constant,
-                new Scalar(255, 255, 255, 255)  // 白
+                new Scalar(255, 255, 255, 255)
             );
 
-            // Mat -> ImageSharp 変換 (修正)
             var result = MatToImageSharp(rotated);
-            // mat, rotMat は using で破棄される
-
             return result;
         }
         finally
@@ -3255,23 +3260,12 @@ public static class SuperPdfUtil
         // RGBAでbyte4チャンネル
         byte[] bytes = new byte[w * h * 4];
 
-        // v1.0以降: 行ごとにGetPixelRowSpan() で読み取り
-        int offset = 0;
+        // Rgba32 はメモリ上 R,G,B,A 連続なので MemoryMarshal.AsBytes で行単位バルクコピー
         src.ProcessPixelRows(target =>
         {
             for (int y = 0; y < h; y++)
             {
-                var rowSpan = target.GetRowSpan(y);
-
-                for (int x = 0; x < w; x++)
-                {
-                    var px = rowSpan[x];
-                    bytes[offset + 0] = px.R;
-                    bytes[offset + 1] = px.G;
-                    bytes[offset + 2] = px.B;
-                    bytes[offset + 3] = px.A;
-                    offset += 4;
-                }
+                MemoryMarshal.AsBytes(target.GetRowSpan(y)).CopyTo(bytes.AsSpan(y * w * 4, w * 4));
             }
         });
 
