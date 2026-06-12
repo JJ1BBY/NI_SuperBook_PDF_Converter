@@ -260,68 +260,152 @@ public class ImageMagickUtil
 
         int totalPages = await GetPdfPageCountAsync(pdfPath, cancel);
 
-        // 500ページ以上は1並列固定 (1プロセス最大6GB × 2並列 = 12GB でRAMハング実績あり)
-        int parallelism = totalPages >= 500 ? 1 : Math.Max(1, Math.Min(2, Environment.ProcessorCount / 2));
-        if (totalPages < parallelism * 8) parallelism = 1;
+        // --- ページサイズ(出力解像度)と利用可能リソース(物理メモリ・空きディスク)から、
+        //     1バッチあたりの分割ページ数と並列数を動的に推定する ---
 
-        if (parallelism <= 1)
+        // 1プロセスが1ページを処理する際の作業メモリ概算。
+        // ImageMagick Q16/HDRI はチャンネルあたり float を内部保持するため (RGBA×4byte) を保守的に見積もる。
+        long perPageMemBytes = Math.Max(8L * 1024 * 1024, (long)option.Width * option.Height * 16);
+
+        // 1ページあたりの出力サイズ概算 (24bit BMP) ※ディスク見積り用の上限値
+        long perPageOutBytes = (long)option.Width * option.Height * 3 + 1024;
+
+        // 物理メモリの一定割合を、全 magick プロセス合計のメモリ予算とする
+        long totalRamBytes = GetTotalPhysicalMemoryBytesSafe();
+        long memBudgetBytes = Math.Max(1L * 1024 * 1024 * 1024, (long)(totalRamBytes * 0.40));
+
+        // メモリ予算から、1プロセスが安全に同時保持できるページ数を算出
+        int batchPages = (int)Math.Clamp(memBudgetBytes / perPageMemBytes, 8L, 4000L);
+
+        // 並列数: 総ページ数が1バッチを超え、かつコアに余裕がある場合のみ最大2並列。
+        // 並列で動かす場合は各レーンにメモリ予算を分配し、1バッチのページ数を縮小する。
+        int parallelism = 1;
+        if (totalPages > batchPages)
+        {
+            parallelism = Math.Max(1, Math.Min(2, Environment.ProcessorCount / 2));
+            if (parallelism > 1) batchPages = Math.Max(8, batchPages / parallelism);
+        }
+        batchPages = Math.Min(batchPages, totalPages);
+
+        // ディスク容量チェック: 全ページ分の出力がディスクに収まるか (収まらなければ即時中断)
+        long freeDiskBytes = GetFreeDiskBytesSafe(dstDir);
+        long requiredDiskBytes = (long)totalPages * perPageOutBytes;
+        if (freeDiskBytes > 0 && requiredDiskBytes > freeDiskBytes / 10 * 9)
+        {
+            throw new CoresException(
+                $"[ENOSPC] PDF展開の出力に必要なディスク容量が不足しています。" +
+                $"必要 {requiredDiskBytes / (1024 * 1024)}MB / 空き {freeDiskBytes / (1024 * 1024)}MB ({totalPages}ページ)。 File: '{pdfPath}'");
+        }
+
+        // 1プロセスあたりのメモリ上限 (magick の -limit に渡す保険。超過分はディスクキャッシュへ退避させ、RAM枯渇クラッシュを防ぐ)
+        long perProcMemLimitMb = Math.Max(256, memBudgetBytes / Math.Max(1, parallelism) / (1024 * 1024));
+        string limitStr = $"-limit memory {perProcMemLimitMb}MiB -limit map {perProcMemLimitMb * 2}MiB";
+
+        Con.WriteLine($"[ImageMagick Dynamic] totalPages={totalPages}, batchPages={batchPages}, parallelism={parallelism}, " +
+            $"memBudget={memBudgetBytes / (1024 * 1024)}MB, perPageMem={perPageMemBytes / (1024 * 1024)}MB, " +
+            $"freeDisk={(freeDiskBytes >= 0 ? freeDiskBytes / (1024 * 1024) : -1)}MB, reqDisk={requiredDiskBytes / (1024 * 1024)}MB");
+
+        // 分割不要 (1バッチに収まる) 場合は、従来同等の最速パス (1回の magick 呼び出し) で展開する
+        if (totalPages <= batchPages)
         {
             await ExtractImagesFromPdfAsync(pdfPath, dstDir, option, cancel);
             return;
         }
 
-        Con.WriteLine($"[ImageMagick Parallel] totalPages={totalPages}, parallelism={parallelism}");
+        // [start, end] のバッチ一覧を作成
+        var batches = new List<(int Start, int End)>();
+        for (int start = 0; start < totalPages; start += batchPages)
+        {
+            int end = Math.Min(start + batchPages - 1, totalPages - 1);
+            batches.Add((start, end));
+        }
 
-        string tmpDir = PP.Combine(Env.MyLocalTempDir, $"imgmk_parallel_{Guid.NewGuid():N}");
+        string tmpDir = PP.Combine(Env.MyLocalTempDir, $"imgmk_batch_{Guid.NewGuid():N}");
         try
         {
             await Lfs.CreateDirectoryAsync(tmpDir, cancel: cancel);
 
-            int pagesPerJob = totalPages / parallelism;
-            var tasks = new Task[parallelism];
-
-            for (int i = 0; i < parallelism; i++)
+            // parallelism 個ずつ「波 (wave)」に分けて実行。波ごとに出力を本来のディレクトリへ移動して一時領域を解放し、
+            // 同時に存在する magick プロセス数とメモリ使用量を常に予算内に抑える。
+            for (int waveStart = 0; waveStart < batches.Count; waveStart += parallelism)
             {
-                int jobIndex = i;
-                int startPage = jobIndex * pagesPerJob;
-                int endPage = (jobIndex == parallelism - 1) ? totalPages - 1 : (jobIndex + 1) * pagesPerJob - 1;
-                string jobDir = PP.Combine(tmpDir, $"job_{jobIndex:D2}");
-                await Lfs.CreateDirectoryAsync(jobDir, cancel: cancel);
+                var wave = new List<(int Start, int End, string JobDir)>();
+                var tasks = new List<Task>();
 
-                string dstPattern = (PP.RemoveLastSeparatorChar(jobDir) + @"\page_%05d" + ext)._EnsureQuotation();
-                string pageRange = $"[{startPage}-{endPage}]";
-
-                Con.WriteLine($"[ImageMagick Parallel] Job {jobIndex + 1}/{parallelism}: pages {startPage}-{endPage}");
-                tasks[jobIndex] = RunMagickAsync(
-                    $"-density {option.Density} {(pdfPath + pageRange)._EnsureQuotation()} -resize {option.Width}x{option.Height} {bmpOptions}{dstPattern}",
-                    cancel: cancel);
-            }
-
-            await Task.WhenAll(tasks);
-
-            // 各ジョブの出力ファイルをグローバル連番にリネームしながらコピー
-            int globalIndex = 0;
-            for (int i = 0; i < parallelism; i++)
-            {
-                string jobDir = PP.Combine(tmpDir, $"job_{i:D2}");
-                var jobFiles = (await Lfs.EnumDirectoryAsync(jobDir, false, cancel: cancel))
-                    .Where(x => x.IsFile && x.Name._IsExtensionMatch(ext))
-                    .OrderBy(x => x.Name, StrCmpi);
-
-                foreach (var f in jobFiles)
+                for (int k = 0; k < parallelism && (waveStart + k) < batches.Count; k++)
                 {
-                    string dstFileName = $"page_{globalIndex:D5}{ext}";
-                    await Lfs.CopyFileAsync(f.FullPath, PP.Combine(dstDir, dstFileName), cancel: cancel);
-                    globalIndex++;
+                    var (bStart, bEnd) = batches[waveStart + k];
+                    string jobDir = PP.Combine(tmpDir, $"job_{waveStart + k:D4}");
+                    await Lfs.CreateDirectoryAsync(jobDir, cancel: cancel);
+                    wave.Add((bStart, bEnd, jobDir));
+
+                    string dstPattern = (PP.RemoveLastSeparatorChar(jobDir) + @"\page_%05d" + ext)._EnsureQuotation();
+                    string pageRange = $"[{bStart}-{bEnd}]";
+
+                    Con.WriteLine($"[ImageMagick Dynamic] batch {waveStart + k + 1}/{batches.Count}: pages {bStart}-{bEnd}");
+                    tasks.Add(RunMagickAsync(
+                        $"-density {option.Density} {limitStr} {(pdfPath + pageRange)._EnsureQuotation()} -resize {option.Width}x{option.Height} {bmpOptions}{dstPattern}",
+                        cancel: cancel,
+                        timeoutMsecs: option.TimeoutSecs * 1000));
+                }
+
+                await Task.WhenAll(tasks);
+
+                // この波の出力を、グローバル連番 (= バッチ開始ページ + バッチ内ローカル連番) で本来のディレクトリへ移動
+                foreach (var (bStart, bEnd, jobDir) in wave)
+                {
+                    var jobFiles = (await Lfs.EnumDirectoryAsync(jobDir, false, cancel: cancel))
+                        .Where(x => x.IsFile && x.Name._IsExtensionMatch(ext))
+                        .OrderBy(x => x.Name, StrCmpi)
+                        .ToList();
+
+                    int local = 0;
+                    foreach (var f in jobFiles)
+                    {
+                        int globalIndex = bStart + local;
+                        string dstFileName = $"page_{globalIndex:D5}{ext}";
+                        await Lfs.CopyFileAsync(f.FullPath, PP.Combine(dstDir, dstFileName), cancel: cancel);
+                        local++;
+                    }
+
+                    try { await Lfs.DeleteDirectoryAsync(jobDir, true, cancel: cancel); } catch { }
                 }
             }
 
-            Con.WriteLine($"[ImageMagick Parallel] Done: {globalIndex} pages extracted.");
+            int produced = (await Lfs.EnumDirectoryAsync(dstDir, false, cancel: cancel)).Count(x => x.IsFile && x.Name._IsExtensionMatch(ext));
+            Con.WriteLine($"[ImageMagick Dynamic] Done: {produced} pages extracted.");
         }
         finally
         {
             try { await Lfs.DeleteDirectoryAsync(tmpDir, true, cancel: cancel); } catch { }
         }
+    }
+
+    // 物理メモリ総量 (バイト) を取得する。取得できない場合は 8GB と仮定する。
+    static long GetTotalPhysicalMemoryBytesSafe()
+    {
+        try
+        {
+            long t = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+            if (t > 0) return t;
+        }
+        catch { }
+        return 8L * 1024 * 1024 * 1024;
+    }
+
+    // 指定パスが存在するドライブの空き容量 (バイト) を取得する。取得できない場合は -1 を返す。
+    static long GetFreeDiskBytesSafe(string path)
+    {
+        try
+        {
+            string? root = Path.GetPathRoot(Path.GetFullPath(path._RemoveQuotation()));
+            if (root._IsFilled())
+            {
+                return new DriveInfo(root).AvailableFreeSpace;
+            }
+        }
+        catch { }
+        return -1;
     }
 
     public async Task ApplyDocInfoToPdfFileAsync(string pdfPath, PdfDocInfo info, CancellationToken cancel = default)
