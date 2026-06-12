@@ -3092,7 +3092,7 @@ public class AiUtilRealEsrganEngine : AiUtilBasicEngine
         }
     }
 
-    public async Task PerformAsync(string srcImgDirPath, string imgExtension, string dstImgDirPath, AiUtilRealEsrganPerformOption? option = null, CancellationToken cancel = default)
+    public async Task PerformAsync(string srcImgDirPath, string imgExtension, string dstImgDirPath, AiUtilRealEsrganPerformOption? option = null, Func<IReadOnlyList<string>, Task>? onChunkCompleted = null, CancellationToken cancel = default)
     {
         imgExtension._CheckStrFilled(nameof(imgExtension));
 
@@ -3113,6 +3113,7 @@ public class AiUtilRealEsrganEngine : AiUtilBasicEngine
             Con.WriteLine($"Real-ESRGAN: Skip: Copying from '{srcImgDirPath}' to '{dstImgDirPath}' ...");
             var srcImgFiles2 = (await Lfs.EnumDirectoryAsync(srcImgDirPath, false, cancel: cancel)).Where(x => x.IsFile && x.Name._IsExtensionMatch(imgExtension)).OrderBy(x => x.Name, StrCmpi);
             int n2 = 0;
+            List<string> skipCopiedFiles = new List<string>();
             foreach (var src in srcImgFiles2)
             {
                 n2++;
@@ -3121,8 +3122,14 @@ public class AiUtilRealEsrganEngine : AiUtilBasicEngine
                 string dstFilePath = PP.Combine(dstImgDirPath, fn);
 
                 await Lfs.CopyFileAsync(src.FullPath, dstFilePath);
+
+                skipCopiedFiles.Add(dstFilePath);
             }
             Con.WriteLine("Real-ESRGAN: Skip: Done.");
+            if (onChunkCompleted != null)
+            {
+                await onChunkCompleted(skipCopiedFiles);
+            }
             return;
         }
 
@@ -3191,13 +3198,23 @@ public class AiUtilRealEsrganEngine : AiUtilBasicEngine
 
             Con.WriteLine($"Real-ESRGAN: Chunk {i + 1} / {srcImgFilesByChunk.Count}: Post: Copying from '{pythonBatchOutDir}' to '{dstImgDirPath}' ...");
 
+            List<string> completedDstFiles = new List<string>();
+
             foreach (var src in generatedImgFiles)
             {
                 string dstFilePath = PP.Combine(dstImgDirPath, src.Name);
 
                 await Lfs.CopyFileAsync(src.FullPath, dstFilePath);
+
+                completedDstFiles.Add(dstFilePath);
             }
             Con.WriteLine($"Real-ESRGAN: Chunk {i + 1} / {srcImgFilesByChunk.Count}: Post: Done.");
+
+            // チャンク完了通知 (GPU 処理と後段 CPU 処理の重畳実行用)
+            if (onChunkCompleted != null)
+            {
+                await onChunkCompleted(completedDstFiles);
+            }
         }
     }
 

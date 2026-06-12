@@ -4,6 +4,7 @@ using System;
 using System.Buffers;
 using System.Linq;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
@@ -2591,22 +2592,50 @@ public static class SuperPdfUtil
             ext = ".png";
         }
 
-        if (sharedRealesrgan != null)
+        // RealESRGAN のチャンク完了通知を deskew コンシューマに渡す Channel (GPU→CPU 重畳実行)
+        var completedChunkChannel = Channel.CreateUnbounded<IReadOnlyList<string>>();
+
+        async Task RunRealesrganWithNotifyAsync()
         {
-            // 呼び出し元から渡された共有エンジンを使用 (複数PDF処理でサーバーを常駐させる)
-            await sharedRealesrgan.PerformAsync(pdf_extracted_dir2, ext, pdf_ai_result_dir, aiOpt, cancel: cancel);
-        }
-        else
-        {
-            await using var realesrgan = new AiUtilRealEsrganEngine(SuperBookExternalTools.Settings);
-            await realesrgan.PerformAsync(pdf_extracted_dir2, ext, pdf_ai_result_dir, aiOpt, cancel: cancel);
+            try
+            {
+                Func<IReadOnlyList<string>, Task> onChunkCompleted =
+                    paths => completedChunkChannel.Writer.WriteAsync(paths, cancel).AsTask();
+
+                if (sharedRealesrgan != null)
+                {
+                    // 呼び出し元から渡された共有エンジンを使用 (複数PDF処理でサーバーを常駐させる)
+                    await sharedRealesrgan.PerformAsync(pdf_extracted_dir2, ext, pdf_ai_result_dir, aiOpt, onChunkCompleted, cancel: cancel);
+                }
+                else
+                {
+                    await using var realesrgan = new AiUtilRealEsrganEngine(SuperBookExternalTools.Settings);
+                    await realesrgan.PerformAsync(pdf_extracted_dir2, ext, pdf_ai_result_dir, aiOpt, onChunkCompleted, cancel: cancel);
+                }
+
+                completedChunkChannel.Writer.TryComplete();
+            }
+            catch (Exception ex)
+            {
+                // deskew コンシューマがチャンク待ちでハングしないよう、例外を Channel に伝播する
+                completedChunkChannel.Writer.TryComplete(ex);
+                throw;
+            }
         }
 
-        // 色調整・傾き修正
+        // 色調整・傾き修正 (deskew + 色統計収集は RealESRGAN のチャンク完了と並行実行)
         PnOcrLibBookMetaData? result;
         try
         {
-            result = await PerformPagesYohakuAsync(pdf_ai_result_dir, pdf_adjusted_dir, pdf_tmp_dir, options.MarginPercent, maxCpu, maxPagesForDebug: options.MaxPagesForDebug, saveDebugPng: options.SaveDebugPng, srcPdfPathForLogging: srcPdfPath);
+            var realesrganTask = RunRealesrganWithNotifyAsync();
+            var deskewTask = PerformPagesDeskewStreamingAsync(completedChunkChannel.Reader, pdf_tmp_dir, maxCpu,
+                maxPagesForDebug: options.MaxPagesForDebug, srcPdfPathForLogging: srcPdfPath, cancel: cancel);
+
+            await Task.WhenAll(realesrganTask, deskewTask);
+
+            var deskewResult = await deskewTask;
+
+            result = await PerformPagesYohakuAfterDeskewAsync(deskewResult, pdf_adjusted_dir, pdf_tmp_dir, options.MarginPercent, maxCpu, saveDebugPng: options.SaveDebugPng, srcPdfPathForLogging: srcPdfPath);
         }
         catch (Exception ex) when (IsDiskFullException(ex))
         {
@@ -2672,6 +2701,42 @@ public static class SuperPdfUtil
         string srcPdfPathForLogging = ""
         )
     {
+        if (!Directory.Exists(srcDir))
+        {
+            throw new DirectoryNotFoundException($"srcDir not found: {srcDir}");
+        }
+
+        var allSrcImgFiles = Directory.GetFiles(srcDir, "*", SearchOption.TopDirectoryOnly)
+            .Where(x => x._IsExtensionMatch(".bmp .png"))
+            .OrderBy(f => f) // ファイル名順にソート
+            .ToList();
+
+        // 全ファイルを 1 チャンクとして Channel に流すことで、従来どおりの直列動作となる
+        var channel = Channel.CreateUnbounded<IReadOnlyList<string>>();
+        channel.Writer.TryWrite(allSrcImgFiles);
+        channel.Writer.TryComplete();
+
+        var deskewResult = await PerformPagesDeskewStreamingAsync(channel.Reader, tmpDir, maxCpu,
+            noDeskew: noDeskew, maxPagesForDebug: maxPagesForDebug, srcPdfPathForLogging: srcPdfPathForLogging);
+
+        return await PerformPagesYohakuAfterDeskewAsync(deskewResult, dstDir, tmpDir, marginPercent, maxCpu,
+            noOcr: noOcr, saveDebugPng: saveDebugPng, srcPdfPathForLogging: srcPdfPathForLogging);
+    }
+
+    /// <summary>
+    /// RealESRGAN のチャンク完了通知 (完成した画像ファイルパスのリスト) を Channel から受信するたびに、
+    /// そのページ群の deskew (傾き補正) + カラー統計収集を並列実行する。
+    /// Channel 完了かつ全ページ処理完了後、後段 (PerformPagesYohakuAfterDeskewAsync) に渡す結果を返す。
+    /// </summary>
+    internal static async Task<YohakuDeskewResult> PerformPagesDeskewStreamingAsync(
+        ChannelReader<IReadOnlyList<string>> completedFilesReader,
+        string tmpDir,
+        int maxCpu,
+        bool noDeskew = false,
+        int maxPagesForDebug = int.MaxValue,
+        string srcPdfPathForLogging = "",
+        CancellationToken cancel = default)
+    {
         if (maxPagesForDebug <= 0) maxPagesForDebug = int.MaxValue;
 
         // ENOSPC 早期中断フラグ (Task.WhenAll が全タスク完了を待つ問題を緩和)
@@ -2693,51 +2758,69 @@ public static class SuperPdfUtil
         }
 
         // ---------------------------------------------------------
-        // (1) 入力PNGファイル一覧を取得し、ソートしてページリストを作る
-        // ---------------------------------------------------------
-        if (!Directory.Exists(srcDir))
-        {
-            throw new DirectoryNotFoundException($"srcDir not found: {srcDir}");
-        }
-        if (!Directory.Exists(dstDir))
-        {
-            Directory.CreateDirectory(dstDir);
-        }
-
-        var allSrcImgFiles = Directory.GetFiles(srcDir, "*", SearchOption.TopDirectoryOnly)
-            .Where(x => x._IsExtensionMatch(".bmp .png"))
-            .OrderBy(f => f) // ファイル名順にソート
-            .Take(maxPagesForDebug) // debug
-            .ToList();
-
-        int totalPages = allSrcImgFiles.Count;
-        if (totalPages == 0)
-        {
-            Console.WriteLine("No PNG files found in srcDir.");
-            return null;
-        }
-
-        var pageInfos = allSrcImgFiles
-            .Select((filePath, idx) => new PageInfo
-            {
-                FilePath = filePath,
-                PageNumber = idx + 1,
-                IsOdd = ((idx + 1) % 2 == 1)
-            })
-            .ToList();
-
-        var oddGroup = pageInfos.Where(p => p.IsOdd).ToList();
-        var evenGroup = pageInfos.Where(p => !p.IsOdd).ToList();
-
-        // ---------------------------------------------------------
-        // (2) 全ページを走査して deskew(傾き補正) → カラー統計抽出 → 一時保存
+        // (1)+(2) チャンク完了通知を受信するたびにページ番号を割り当て、
+        //         deskew(傾き補正) → カラー統計抽出 → 一時保存 を並列開始する
+        //         (チャンクはファイル名昇順に到着するため、累計到着順 = 全体ソート順)
         // ---------------------------------------------------------
         var semaphore = new SemaphoreSlim(maxCpu, maxCpu);
-        //var semaphore = new SemaphoreSlim(1, 1);
         var colorStatsList_Even = new ConcurrentBag<ColorStats>();
         var colorStatsList_Odd = new ConcurrentBag<ColorStats>();
 
-        await Task.WhenAll(pageInfos.Select(async page =>
+        var pageInfos = new List<PageInfo>();
+        var pageTasks = new List<Task>();
+
+        Exception? upstreamException = null;
+        try
+        {
+            await foreach (var completedFiles in completedFilesReader.ReadAllAsync(cancel))
+            {
+                var sortedFiles = completedFiles
+                    .Where(x => x._IsExtensionMatch(".bmp .png"))
+                    .OrderBy(f => f) // チャンク内もファイル名順にソート
+                    .ToList();
+
+                Con.WriteLine($"[GPU+CPU重畳] チャンク受信: {sortedFiles.Count} ファイル (累計 {pageInfos.Count + sortedFiles.Count} ページ)。deskew を並行開始します。");
+
+                foreach (var filePath in sortedFiles)
+                {
+                    if (pageInfos.Count >= maxPagesForDebug) break;
+
+                    var page = new PageInfo
+                    {
+                        FilePath = filePath,
+                        PageNumber = pageInfos.Count + 1,
+                        IsOdd = ((pageInfos.Count + 1) % 2 == 1)
+                    };
+                    pageInfos.Add(page);
+                    pageTasks.Add(DeskewOnePageAsync(page));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // 上流 (RealESRGAN) の失敗。開始済みページタスクの完了を待ってから例外を伝播する
+            upstreamException = ex;
+        }
+
+        if (upstreamException != null)
+        {
+            try { await Task.WhenAll(pageTasks); } catch { }
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(upstreamException).Throw();
+        }
+
+        await Task.WhenAll(pageTasks);
+
+        if (Interlocked.CompareExchange(ref diskFullFlag, 0, 0) != 0)
+            throw new IOException($"ディスク容量不足 (ENOSPC) でページ処理を中断しました。{(srcPdfPathForLogging._IsFilled() ? $" File: '{srcPdfPathForLogging}'" : "")}");
+
+        return new YohakuDeskewResult
+        {
+            PageInfos = pageInfos,
+            ColorStatsOdd = colorStatsList_Odd.ToList(),
+            ColorStatsEven = colorStatsList_Even.ToList(),
+        };
+
+        async Task DeskewOnePageAsync(PageInfo page)
         {
             if (Interlocked.CompareExchange(ref diskFullFlag, 0, 0) != 0) return; // ENOSPC 早期中断
             Con.WriteLine($"Loading " + page.FilePath);
@@ -2836,17 +2919,47 @@ public static class SuperPdfUtil
             {
                 semaphore.Release();
             }
-        }));
+        }
+    }
 
-        if (Interlocked.CompareExchange(ref diskFullFlag, 0, 0) != 0)
-            throw new IOException($"ディスク容量不足 (ENOSPC) でページ処理を中断しました。{(srcPdfPathForLogging._IsFilled() ? $" File: '{srcPdfPathForLogging}'" : "")}");
+    /// <summary>
+    /// PerformPagesDeskewStreamingAsync の結果を受けて、カラー補正パラメータ決定以降 (ステップ3〜6) を実行する。
+    /// ステップ3 (色補正パラメータ) は全ページの統計が必要なため、全ページの deskew 完了後にのみ呼び出せる。
+    /// </summary>
+    internal static async Task<PnOcrLibBookMetaData?> PerformPagesYohakuAfterDeskewAsync(
+        YohakuDeskewResult deskewResult,
+        string dstDir,
+        string tmpDir,
+        int marginPercent,
+        int maxCpu,
+        bool noOcr = false,
+        bool saveDebugPng = false,
+        string srcPdfPathForLogging = "")
+    {
+        var pageInfos = deskewResult.PageInfos;
+
+        if (pageInfos.Count == 0)
+        {
+            Console.WriteLine("No PNG files found in srcDir.");
+            return null;
+        }
+
+        if (!Directory.Exists(dstDir))
+        {
+            Directory.CreateDirectory(dstDir);
+        }
+
+        // ENOSPC 早期中断フラグ (Task.WhenAll が全タスク完了を待つ問題を緩和)
+        int diskFullFlag = 0;
+
+        var semaphore = new SemaphoreSlim(maxCpu, maxCpu);
 
         // ---------------------------------------------------------
         // (3) カラー統計情報から外れ値除外し、
         //     書籍全体に対しての共通カラー補正パラメータを決定
         // ---------------------------------------------------------
-        var colorStatsAll_Even = colorStatsList_Even.ToList();
-        var colorStatsAll_Odd = colorStatsList_Odd.ToList();
+        var colorStatsAll_Even = deskewResult.ColorStatsEven;
+        var colorStatsAll_Odd = deskewResult.ColorStatsOdd;
 
         var filteredStats_Even = ExcludeOutliers(colorStatsAll_Even);
         var filteredStats_Odd = ExcludeOutliers(colorStatsAll_Odd);
@@ -4134,6 +4247,17 @@ internal class PageInfo
     public string FilePathColorAdj = null!;
     public int PageNumber { get; set; }
     public bool IsOdd { get; set; }
+}
+
+/// <summary>
+/// PerformPagesDeskewStreamingAsync の結果 (deskew 済みページ一覧と色統計)。
+/// PerformPagesYohakuAfterDeskewAsync への入力となる。
+/// </summary>
+internal class YohakuDeskewResult
+{
+    public List<PageInfo> PageInfos = new List<PageInfo>();
+    public List<ColorStats> ColorStatsOdd = new List<ColorStats>();
+    public List<ColorStats> ColorStatsEven = new List<ColorStats>();
 }
 
 internal class ColorStats
