@@ -85,7 +85,6 @@ public class PdfYomitokuOptions
     public int TimeoutSecs = 5 * 3600;
     public string ReadingOrder = ""; // 空 = yomitoku 既定 (--reading_order を渡さない)
     public bool OverwriteExisting = false; // true = 既存出力があっても再実行して上書き
-    public int MergeFigureGapPx = 100;    // 挿絵 bbox 近接マージの閾値 (px)。0 = 無効
 }
 
 public class PdfYomitokuMiniPageInfo
@@ -528,7 +527,6 @@ public class PdfYomitokuLib
             lite = baseOpt.LiteMode,
             ignore_meta = baseOpt.IgnoreHeaderFooter,
             reading_order = baseOpt.ReadingOrder._NonNullTrim(), // 空 = auto
-            merge_figure_gap = baseOpt.MergeFigureGapPx,
             tasks = jobTasks,
         };
 
