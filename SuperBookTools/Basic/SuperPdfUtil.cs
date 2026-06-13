@@ -1016,9 +1016,12 @@ public class PdfYomitokuLib
             {
                 string fn = m.Groups[1].Value;
                 if (!jpegDims.TryGetValue(fn, out var d)) return m.Value;
+                // 画像は 90°CCW 回転済み横長 JPEG。SVG 内で 90°CW 回転して元の縦長に戻す。
+                // transform="translate(H,0) rotate(90)": 先に rotate(90°CW)、次に translate で正座標に移動。
                 return $"<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\"" +
-                       $" width=\"{d.W}\" height=\"{d.H}\" viewBox=\"0 0 {d.W} {d.H}\">" +
-                       $"<image xlink:href=\"../media/{fn}\" x=\"0\" y=\"0\" width=\"{d.W}\" height=\"{d.H}\"/></svg>";
+                       $" width=\"{d.H}\" height=\"{d.W}\" viewBox=\"0 0 {d.H} {d.W}\">" +
+                       $"<image xlink:href=\"../media/{fn}\" x=\"0\" y=\"0\" width=\"{d.W}\" height=\"{d.H}\"" +
+                       $" transform=\"translate({d.H},0) rotate(90)\"/></svg>";
             });
             if (newHtml != html) modifiedXhtml[key] = newHtml;
         }
