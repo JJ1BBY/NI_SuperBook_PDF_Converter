@@ -147,6 +147,23 @@ def main():
 
         result, _, _ = analyzer(img)
 
+        if merge_gap > 0 and len(result.figures) > 1:
+            original_count = len(result.figures)
+            merged_figures = _merge_close_figures(result.figures, merge_gap)
+            if len(merged_figures) < original_count:
+                print(
+                    f"  [figure_merge] page {page_no}: {original_count} → {len(merged_figures)} figures (gap={merge_gap}px)",
+                    flush=True,
+                )
+                result = result.model_copy(update={"figures": merged_figures})
+            else:
+                # [DEBUG] 複数figureがあるがギャップ超過でマージされなかったページ
+                boxes = [f.box for f in result.figures]
+                print(
+                    f"  [figure_merge_skip] page {page_no}: {original_count} figures not merged (gap>{merge_gap}px) boxes={boxes}",
+                    flush=True,
+                )
+
         for task in tasks:
             fmt = task["format"]
             combine = bool(task["combine"])
