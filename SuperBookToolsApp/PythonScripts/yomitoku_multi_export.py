@@ -214,6 +214,13 @@ def main():
                     flush=True,
                 )
                 result = result.model_copy(update={"figures": merged_figures})
+            else:
+                # [DEBUG] 複数figureがあるがギャップ超過でマージされなかったページ
+                boxes = [f.box for f in result.figures]
+                print(
+                    f"  [figure_merge_skip] page {page_no}: {original_count} figures not merged (gap>{merge_gap}px) boxes={boxes}",
+                    flush=True,
+                )
 
         for task in tasks:
             fmt = task["format"]
