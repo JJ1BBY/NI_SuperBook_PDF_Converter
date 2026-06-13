@@ -260,7 +260,7 @@ public class PdfYomitokuLib
 
                     bool needFallback = true;
 
-                    bool useMulti = groupTasks.Count >= 2 &&
+                    bool useMulti = groupTasks.Count >= 1 &&
                         this.MultiExportScriptPath._IsFilled() &&
                         await Lfs.IsFileExistsAsync(this.MultiExportScriptPath, cancel: cancel);
 
