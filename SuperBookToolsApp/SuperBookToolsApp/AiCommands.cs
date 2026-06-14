@@ -226,7 +226,7 @@ namespace SuperBookTools.App
                     }
                     int predictedSkip = preScanWillSkip.Count(x => x);
                     int predictedProcess = numTotal - predictedSkip;
-                    int pagesToProcess = prescanResults.Where(r => !r.willSkip).Sum(r => r.pageCount);
+                    int pagesToProcess = preScanPageCounts.Select((pc, i) => preScanWillSkip[i] ? 0 : pc).Sum();
                     $"[ETA] Pre-scan done: {numTotal} files ({predictedSkip} already done, {predictedProcess} to process, {pagesToProcess} pages)"._Error();
                 }
 
@@ -348,7 +348,6 @@ namespace SuperBookTools.App
 
             return 0;
         }
-    }
 
     private sealed class ConvertPdfEtaTracker
     {
@@ -467,4 +466,5 @@ namespace SuperBookTools.App
         }
         catch { }
     }
+}
 }
