@@ -231,7 +231,10 @@ namespace SuperBookTools.App
                 }
 
                 double fallbackSecsPerPage = performOcr ? 15.0 : 5.0;
-                var eta = new ConvertPdfEtaTracker(preScanPageCounts, preScanWillSkip, fallbackSecsPerPage);
+                double calibratedRate = showEta ? LoadEtaCalibration(performOcr) : 0;
+                if (showEta && calibratedRate > 0)
+                    $"[ETA] Using calibrated rate from previous run: {calibratedRate:F2} pg/s ({(performOcr ? "with OCR" : "no OCR")})"._Error();
+                var eta = new ConvertPdfEtaTracker(preScanPageCounts, preScanWillSkip, fallbackSecsPerPage, calibratedRate);
 
                 // RealESRGAN サーバーを全PDFで共有してモデルロードを1回にする
                 await using var sharedRealesrgan = new AiUtilRealEsrganEngine(SuperBookExternalTools.Settings);
@@ -282,6 +285,9 @@ namespace SuperBookTools.App
                     }
                 }
 
+                if (showEta && eta.PagesPerSecond > 0)
+                    SaveEtaCalibration(performOcr, eta.PagesPerSecond);
+
                 if (errorFilesList.Count >= 1)
                 {
                     $"--- Error files ---"._Error();
@@ -328,16 +334,25 @@ namespace SuperBookTools.App
         private double _totalSecondsAccumulated;
         private int _pagesRemaining;
         private readonly double _fallbackSecsPerPage;
+        private readonly double _calibratedPagesPerSec;
 
-        public ConvertPdfEtaTracker(int[] preScanPageCounts, bool[] preScanWillSkip, double fallbackSecsPerPage)
+        public ConvertPdfEtaTracker(int[] preScanPageCounts, bool[] preScanWillSkip, double fallbackSecsPerPage, double calibratedPagesPerSec = 0)
         {
             _fallbackSecsPerPage = fallbackSecsPerPage;
+            _calibratedPagesPerSec = calibratedPagesPerSec;
             for (int i = 0; i < preScanPageCounts.Length; i++)
                 if (!preScanWillSkip[i]) _pagesRemaining += preScanPageCounts[i];
         }
 
-        private double PagesPerSecond =>
+        // 今回のバッチで実測したページ/秒 (実データがなければ 0)
+        public double PagesPerSecond =>
             _totalSecondsAccumulated > 0 ? _totalPagesAccumulated / _totalSecondsAccumulated : 0;
+
+        // 実測値 → キャリブレーション値 → ハードコードフォールバック の優先順で使用
+        private double EffectivePagesPerSec =>
+            PagesPerSecond > 0 ? PagesPerSecond :
+            _calibratedPagesPerSec > 0 ? _calibratedPagesPerSec :
+            1.0 / _fallbackSecsPerPage;
 
         public void RecordCompletion(bool wasSkipped, int pageCount, TimeSpan elapsed)
         {
@@ -351,14 +366,55 @@ namespace SuperBookTools.App
 
         public string GetEtaString()
         {
-            double secsPerPage = PagesPerSecond > 0 ? 1.0 / PagesPerSecond : _fallbackSecsPerPage;
-            double remainingSecs = _pagesRemaining * secsPerPage;
+            double remainingSecs = _pagesRemaining / EffectivePagesPerSec;
+            // ETA~ = 推定値（実測なし）、ETA = 実測値ベース
             string label = PagesPerSecond > 0 ? "ETA" : "ETA~";
             var finishAt = DateTime.Now.AddSeconds(remainingSecs);
             return $"{label}: {TimeSpan.FromSeconds(remainingSecs):hh\\:mm\\:ss} (finish ~{finishAt:HH:mm})";
         }
 
-        public string GetRateString() =>
-            PagesPerSecond > 0 ? $"{PagesPerSecond:F1} pg/s" : "-- pg/s";
+        public string GetRateString()
+        {
+            if (PagesPerSecond > 0) return $"{PagesPerSecond:F1} pg/s";
+            if (_calibratedPagesPerSec > 0) return $"~{_calibratedPagesPerSec:F1} pg/s (cal)";
+            return $"~{1.0 / _fallbackSecsPerPage:F2} pg/s (default)";
+        }
+    }
+
+    private static string EtaCalibrationFilePath =>
+        Path.Combine(Env.AppRootDir, "eta_calibration.json");
+
+    private static double LoadEtaCalibration(bool withOcr)
+    {
+        try
+        {
+            if (!File.Exists(EtaCalibrationFilePath)) return 0;
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(EtaCalibrationFilePath));
+            string key = withOcr ? "pagesPerSecWithOcr" : "pagesPerSecNoOcr";
+            return doc.RootElement.TryGetProperty(key, out var val) && val.TryGetDouble(out double rate) ? rate : 0;
+        }
+        catch { return 0; }
+    }
+
+    private static void SaveEtaCalibration(bool withOcr, double pagesPerSec)
+    {
+        try
+        {
+            double noOcr = 0, withOcrSaved = 0;
+            if (File.Exists(EtaCalibrationFilePath))
+            {
+                using var existing = System.Text.Json.JsonDocument.Parse(File.ReadAllText(EtaCalibrationFilePath));
+                if (existing.RootElement.TryGetProperty("pagesPerSecNoOcr", out var p1)) p1.TryGetDouble(out noOcr);
+                if (existing.RootElement.TryGetProperty("pagesPerSecWithOcr", out var p2)) p2.TryGetDouble(out withOcrSaved);
+            }
+            if (withOcr) withOcrSaved = pagesPerSec; else noOcr = pagesPerSec;
+
+            var json = System.Text.Json.JsonSerializer.Serialize(
+                new { pagesPerSecNoOcr = noOcr, pagesPerSecWithOcr = withOcrSaved, lastUpdated = DateTimeOffset.Now.ToString("O") },
+                new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(EtaCalibrationFilePath, json);
+            $"[ETA] Calibration saved ({(withOcr ? "with OCR" : "no OCR")}): {pagesPerSec:F2} pg/s → next run will use this as initial estimate"._Error();
+        }
+        catch { }
     }
 }
