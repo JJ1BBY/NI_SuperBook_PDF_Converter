@@ -252,9 +252,14 @@ namespace SuperBookTools.App
                     $"<< {currentNumber} / {numTotal} >> '{src.FullPath}' Start{startSuffix}"._Error();
 
                     var fileSw = Stopwatch.StartNew();
+                    Action<string, int, int>? stageCallback = showEta ? (stageName, stageNum, totalStages) =>
+                    {
+                        string batchContext = $"[{currentNumber}/{numTotal}ファイル | {eta.GetEtaString()}]";
+                        $"  [Stage {stageNum}/{totalStages}] {stageName}  {batchContext}"._Error();
+                    } : null;
                     try
                     {
-                        var (wasProcessed, actualPageCount) = await SuperPdfUtil.PerformPdfAsync(src.FullPath, dstPath, options, sharedRealesrgan: sharedRealesrgan);
+                        var (wasProcessed, actualPageCount) = await SuperPdfUtil.PerformPdfAsync(src.FullPath, dstPath, options, sharedRealesrgan: sharedRealesrgan, onStageCompleted: stageCallback);
                         fileSw.Stop();
                         int pagesForEta = actualPageCount > 0 ? actualPageCount : thisFilePages;
 

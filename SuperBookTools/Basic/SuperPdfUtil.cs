@@ -2438,7 +2438,7 @@ public static class SuperPdfUtil
     public const int internalHighResImgWidth = 4960;
     public const int internalHighResImgHeight = 7016;
 
-    public static async Task<(bool WasProcessed, int PageCount)> PerformPdfAsync(string srcPdfPath, string dstPdfPath, SuperPerformPdfOptions? options = null, bool useOkFile = true, AiUtilRealEsrganEngine? sharedRealesrgan = null, CancellationToken cancel = default)
+    public static async Task<(bool WasProcessed, int PageCount)> PerformPdfAsync(string srcPdfPath, string dstPdfPath, SuperPerformPdfOptions? options = null, bool useOkFile = true, AiUtilRealEsrganEngine? sharedRealesrgan = null, Action<string, int, int>? onStageCompleted = null, CancellationToken cancel = default)
     {
         if (srcPdfPath._IsSamei(dstPdfPath))
         {
@@ -2461,7 +2461,7 @@ public static class SuperPdfUtil
 
         Con.WriteLine($"[PerformPdfAsync]: Starting '{srcPdfPath}' -> '{dstPdfPath}' ...");
 
-        var result = await PerformPdfMainAsync(srcPdfPath, dstPdfPath, options, sharedRealesrgan: sharedRealesrgan, cancel: cancel);
+        var result = await PerformPdfMainAsync(srcPdfPath, dstPdfPath, options, sharedRealesrgan: sharedRealesrgan, onStageCompleted: onStageCompleted, cancel: cancel);
 
         result.Options = options;
 
@@ -2475,9 +2475,10 @@ public static class SuperPdfUtil
         return (true, result.PageCount);
     }
 
-    static async Task<SuperPdfResult> PerformPdfMainAsync(string srcPdfPath, string dstPdfPath, SuperPerformPdfOptions? options = null, AiUtilRealEsrganEngine? sharedRealesrgan = null, CancellationToken cancel = default)
+    static async Task<SuperPdfResult> PerformPdfMainAsync(string srcPdfPath, string dstPdfPath, SuperPerformPdfOptions? options = null, AiUtilRealEsrganEngine? sharedRealesrgan = null, Action<string, int, int>? onStageCompleted = null, CancellationToken cancel = default)
     {
         options ??= new();
+        var stageSw = Stopwatch.StartNew();
 
         // Windows セキュリティブロック (Zone.Identifier) 解除 — 他PCからコピーしたPDFでmagick.exeがハングする問題を防ぐ
         string zoneFile = srcPdfPath + ":Zone.Identifier";
@@ -2567,6 +2568,7 @@ public static class SuperPdfUtil
         {
             throw new CoresException($"[ENOSPC] PDF展開中にディスク容量不足が発生しました。処理を即時中断します。 File: '{srcPdfPath}'", ex);
         }
+        onStageCompleted?.Invoke($"PDF展開 ({stageSw.Elapsed:hh\\:mm\\:ss})", 1, 5);
 
         // CPU後処理ステージ (deskew/色調整/最終出力/トリム) の並列度を物理メモリ・コア数から動的に決定。
         // 1ワーカーはフル解像度 Rgba32 画像を2〜3枚保持するため約600MB/ワーカーで見積もる。
@@ -2596,6 +2598,7 @@ public static class SuperPdfUtil
             }
             finally { trimSemaphore.Release(); }
         }));
+        onStageCompleted?.Invoke($"トリミング ({stageSw.Elapsed:hh\\:mm\\:ss})", 2, 5);
 
         // realesrgan で鮮明化
         var aiOpt = new AiUtilRealEsrganPerformOption
@@ -2656,8 +2659,10 @@ public static class SuperPdfUtil
             await Task.WhenAll(realesrganTask, deskewTask);
 
             var deskewResult = await deskewTask;
+            onStageCompleted?.Invoke($"RealESRGAN+Deskew ({stageSw.Elapsed:hh\\:mm\\:ss})", 3, 5);
 
             result = await PerformPagesYohakuAfterDeskewAsync(deskewResult, pdf_adjusted_dir, pdf_tmp_dir, options.MarginPercent, maxCpu, saveDebugPng: options.SaveDebugPng, srcPdfPathForLogging: srcPdfPath);
+            onStageCompleted?.Invoke($"余白補正・色補正 ({stageSw.Elapsed:hh\\:mm\\:ss})", 4, 5);
         }
         catch (Exception ex) when (IsDiskFullException(ex))
         {
@@ -2700,6 +2705,7 @@ public static class SuperPdfUtil
             cancel: cancel);
 
         Con.WriteLine($"Build '{dstPdfPath}' OK.");
+        onStageCompleted?.Invoke($"PDF生成 ({stageSw.Elapsed:hh\\:mm\\:ss})", 5, 5);
 
         return new SuperPdfResult
         {
