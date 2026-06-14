@@ -307,17 +307,33 @@ public class PdfYomitokuLib
                     }
                 }
             }
-        }
 
-        // md_paged 出力完了後、Xteink X3 向け EPUB に一括変換
-        try
-        {
-            await ConvertMdPagedDirToEpubAsync(PP.Combine(dstDirPath, "md_paged"), PP.Combine(dstDirPath, "epub"), rotateImagesLeft: epubRotateImagesLeft, cancel: cancel);
-        }
-        catch (Exception ex)
-        {
-            $"*** Error *** Converting md_paged to EPUB under \"{dstDirPath}\"."._Print();
-            ex._Error();
+            // OCR 完了直後にこの冊の EPUB を生成 (全冊完了を待たない)
+            var mdPagedTask = taskList.FirstOrDefault(t => t.TagStr == "md_paged");
+            if (mdPagedTask != null && await Lfs.IsFileExistsAsync(mdPagedTask.DstFilePath, cancel: cancel))
+            {
+                try
+                {
+                    string mdPagedRootDir = PP.Combine(dstDirPath, "md_paged");
+                    string epubRootDir = PP.Combine(dstDirPath, "epub");
+                    string relativeDir = PP.GetRelativeFileName(PP.GetDirectoryName(mdPagedTask.DstFilePath), mdPagedRootDir);
+                    string bookTitle = PP.GetFileNameWithoutExtension(mdPagedTask.DstFilePath);
+                    if (bookTitle.EndsWith(EpubMdPagedFileNameSuffix, StringComparison.OrdinalIgnoreCase))
+                        bookTitle = bookTitle.Substring(0, bookTitle.Length - EpubMdPagedFileNameSuffix.Length).TrimEnd();
+                    string dstEpubDirPath = relativeDir._IsFilled() ? PP.Combine(epubRootDir, relativeDir) : epubRootDir;
+                    string dstEpubFilePath = PP.Combine(dstEpubDirPath, bookTitle + ".epub");
+                    if (await Lfs.IsFileExistsAsync(dstEpubFilePath, cancel: cancel) == false)
+                    {
+                        $"({index} / {srcPdfFiles.Count()}) Converting md_paged to EPUB: \"{dstEpubFilePath}\" ..."._Print();
+                        await ConvertMdToEpubAsync(mdPagedTask.DstFilePath, dstEpubFilePath, bookTitle, rotateImagesLeft: epubRotateImagesLeft, cancel: cancel);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    $"*** Error *** ({index} / {srcPdfFiles.Count()}) Converting md_paged to EPUB for \"{srcPdfFile.FullPath}\"."._Print();
+                    ex._Error();
+                }
+            }
         }
     }
 
