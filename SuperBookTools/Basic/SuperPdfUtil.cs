@@ -140,7 +140,7 @@ public class PdfYomitokuLib
         return destFileTimeStamp;
     }
 
-    public async Task PerformOcrDirAsync(string srcPdfDirPath, string dstDirPath, string? ignorePathStr = null, string mdPagedReadingOrder = "right2left", CancellationToken cancel = default)
+    public async Task PerformOcrDirAsync(string srcPdfDirPath, string dstDirPath, string? ignorePathStr = null, string mdPagedReadingOrder = "right2left", Action<int, int, TimeSpan>? onFileCompleted = null, CancellationToken cancel = default)
     {
         srcPdfDirPath = PP.RemoveLastSeparatorChar(srcPdfDirPath);
         dstDirPath = PP.RemoveLastSeparatorChar(dstDirPath);
@@ -206,6 +206,7 @@ public class PdfYomitokuLib
         foreach (var srcPdfFile in srcPdfFiles)
         {
             index++;
+            var ocrFileSw = Stopwatch.StartNew();
 
             string relativeFileNameWithoutExt = PP.GetPathWithoutExtension(PP.GetRelativeFileName(srcPdfFile.FullPath, srcPdfDirPath));
 
@@ -334,6 +335,9 @@ public class PdfYomitokuLib
                     ex._Error();
                 }
             }
+
+            ocrFileSw.Stop();
+            onFileCompleted?.Invoke(index, srcPdfFiles.Count, ocrFileSw.Elapsed);
         }
     }
 

@@ -247,15 +247,14 @@ namespace SuperBookTools.App
                     int thisFilePages = preScanPageCounts[idx];
 
                     string startSuffix = showEta
-                        ? $" [{thisFilePages} pages | {eta.GetEtaString()}]"
+                        ? $" [{thisFilePages} pages | {eta.GetBatchInfoString()}]"
                         : "";
                     $"<< {currentNumber} / {numTotal} >> '{src.FullPath}' Start{startSuffix}"._Error();
 
                     var fileSw = Stopwatch.StartNew();
                     Action<string, int, int>? stageCallback = showEta ? (stageName, stageNum, totalStages) =>
                     {
-                        string batchContext = $"[{currentNumber}/{numTotal}ファイル | {eta.GetEtaString()}]";
-                        $"  [Stage {stageNum}/{totalStages}] {stageName}  {batchContext}"._Error();
+                        $"  [Stage {stageNum}/{totalStages}] {stageName}  [{eta.GetBatchInfoString()}]"._Error();
                     } : null;
                     try
                     {
@@ -274,7 +273,7 @@ namespace SuperBookTools.App
                             numOk++;
                             if (showEta) eta.RecordCompletion(wasSkipped: false, pagesForEta, fileSw.Elapsed);
                             string okSuffix = showEta
-                                ? $" [{fileSw.Elapsed:hh\\:mm\\:ss} | {eta.GetRateString()} | {eta.GetEtaString()}]"
+                                ? $" [{fileSw.Elapsed:hh\\:mm\\:ss} | {eta.GetRateString()} | {eta.GetBatchInfoString()}]"
                                 : "";
                             $"<< {currentNumber} / {numTotal} >> '{src.FullPath}' OK{okSuffix}"._Error();
                         }
@@ -309,7 +308,25 @@ namespace SuperBookTools.App
             {
                 Con.WriteLine("Performing Japanese OCR started ...");
 
-                await SuperBookExternalTools.YomiToku.PerformOcrDirAsync(dstDir, PP.Combine(dstDir, SuperBookExternalTools.Post_OCR_Dir), SuperBookExternalTools.Post_OCR_Dir, mdPagedReadingOrder);
+                var ocrFileTimes = new List<double>();
+                Action<int, int, TimeSpan>? ocrCallback = showEta ? (current, total, fileElapsed) =>
+                {
+                    if (fileElapsed.TotalSeconds > 1.0)
+                        ocrFileTimes.Add(fileElapsed.TotalSeconds);
+                    int remaining = total - current;
+                    string etaStr = "";
+                    if (ocrFileTimes.Count > 0)
+                    {
+                        double avgSecs = ocrFileTimes.Average();
+                        double remainingSecs = remaining * avgSecs;
+                        var finishAt = DateTime.Now.AddSeconds(remainingSecs);
+                        etaStr = $" | ETA: {TimeSpan.FromSeconds(remainingSecs):hh\\:mm\\:ss} (finish ~{finishAt:HH:mm})";
+                    }
+                    string avgStr = ocrFileTimes.Count > 0 ? $" ~{TimeSpan.FromSeconds(ocrFileTimes.Average()):mm\\:ss}/冊" : "";
+                    $"[OCR {current}/{total} | {fileElapsed:mm\\:ss}/冊{avgStr} | 残り{remaining}冊{etaStr}]"._Error();
+                } : null;
+
+                await SuperBookExternalTools.YomiToku.PerformOcrDirAsync(dstDir, PP.Combine(dstDir, SuperBookExternalTools.Post_OCR_Dir), SuperBookExternalTools.Post_OCR_Dir, mdPagedReadingOrder, onFileCompleted: ocrCallback);
 
                 Con.WriteLine("Performing Japanese OCR completed.");
             }
@@ -338,6 +355,9 @@ namespace SuperBookTools.App
         private long _totalPagesAccumulated;
         private double _totalSecondsAccumulated;
         private int _pagesRemaining;
+        private int _filesRemaining;
+        private int _filesCompleted;
+        private double _totalFileSecondsAccumulated;
         private readonly double _fallbackSecsPerPage;
         private readonly double _calibratedPagesPerSec;
 
@@ -346,7 +366,13 @@ namespace SuperBookTools.App
             _fallbackSecsPerPage = fallbackSecsPerPage;
             _calibratedPagesPerSec = calibratedPagesPerSec;
             for (int i = 0; i < preScanPageCounts.Length; i++)
-                if (!preScanWillSkip[i]) _pagesRemaining += preScanPageCounts[i];
+            {
+                if (!preScanWillSkip[i])
+                {
+                    _pagesRemaining += preScanPageCounts[i];
+                    _filesRemaining++;
+                }
+            }
         }
 
         // 今回のバッチで実測したページ/秒 (実データがなければ 0)
@@ -362,21 +388,40 @@ namespace SuperBookTools.App
         public void RecordCompletion(bool wasSkipped, int pageCount, TimeSpan elapsed)
         {
             _pagesRemaining = Math.Max(0, _pagesRemaining - pageCount);
-            if (!wasSkipped && pageCount > 0 && elapsed.TotalSeconds > 1.0)
+            if (!wasSkipped)
             {
-                _totalPagesAccumulated += pageCount;
-                _totalSecondsAccumulated += elapsed.TotalSeconds;
+                _filesRemaining = Math.Max(0, _filesRemaining - 1);
+                if (pageCount > 0 && elapsed.TotalSeconds > 1.0)
+                {
+                    _totalPagesAccumulated += pageCount;
+                    _totalSecondsAccumulated += elapsed.TotalSeconds;
+                    _totalFileSecondsAccumulated += elapsed.TotalSeconds;
+                    _filesCompleted++;
+                }
             }
+        }
+
+        private string GetRemainingFilesString()
+        {
+            string s = $"残り{_filesRemaining}冊";
+            if (_filesCompleted > 0)
+            {
+                double avgSecsPerFile = _totalFileSecondsAccumulated / _filesCompleted;
+                s += $" ~{TimeSpan.FromSeconds(avgSecsPerFile):mm\\:ss}/冊";
+            }
+            return s;
         }
 
         public string GetEtaString()
         {
             double remainingSecs = _pagesRemaining / EffectivePagesPerSec;
-            // ETA~ = 推定値（実測なし）、ETA = 実測値ベース
             string label = PagesPerSecond > 0 ? "ETA" : "ETA~";
             var finishAt = DateTime.Now.AddSeconds(remainingSecs);
             return $"{label}: {TimeSpan.FromSeconds(remainingSecs):hh\\:mm\\:ss} (finish ~{finishAt:HH:mm})";
         }
+
+        public string GetBatchInfoString() =>
+            $"{GetRemainingFilesString()} | {GetEtaString()}";
 
         public string GetRateString()
         {
