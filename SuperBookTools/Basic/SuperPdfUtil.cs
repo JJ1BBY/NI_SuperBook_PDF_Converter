@@ -946,11 +946,6 @@ public class PdfYomitokuLib
             PostProcessEpubSvgRotate(dstEpubFilePath);
         }
 
-        var srcMdMeta = await Lfs.GetFileMetadataAsync(srcMdFilePath, cancel: cancel);
-        if (srcMdMeta.LastWriteTime != null)
-        {
-            await Lfs.SetFileMetadataAsync(dstEpubFilePath, new FileMetadata(srcMdMeta.LastWriteTime.Value), cancel: cancel);
-        }
     }
 
     static async Task ConvertPngToEpubJpegAsync(string srcPngFilePath, string dstJpgFilePath, bool rotateImagesLeft = false, CancellationToken cancel = default)
