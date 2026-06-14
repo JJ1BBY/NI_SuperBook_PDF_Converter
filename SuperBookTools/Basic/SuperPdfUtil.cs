@@ -2414,6 +2414,7 @@ public class SuperPdfResult
 {
     public PnOcrLibBookMetaData? PnOcrMetaData;
     public SuperPerformPdfOptions? Options;
+    public int PageCount;
 }
 
 public static class SuperPdfUtil
@@ -2437,7 +2438,7 @@ public static class SuperPdfUtil
     public const int internalHighResImgWidth = 4960;
     public const int internalHighResImgHeight = 7016;
 
-    public static async Task<bool> PerformPdfAsync(string srcPdfPath, string dstPdfPath, SuperPerformPdfOptions? options = null, bool useOkFile = true, AiUtilRealEsrganEngine? sharedRealesrgan = null, CancellationToken cancel = default)
+    public static async Task<(bool WasProcessed, int PageCount)> PerformPdfAsync(string srcPdfPath, string dstPdfPath, SuperPerformPdfOptions? options = null, bool useOkFile = true, AiUtilRealEsrganEngine? sharedRealesrgan = null, CancellationToken cancel = default)
     {
         if (srcPdfPath._IsSamei(dstPdfPath))
         {
@@ -2454,7 +2455,7 @@ public static class SuperPdfUtil
             if (await Lfs.IsOkFileExistsAsync(dstPdfPath, digest, cancel: cancel))
             {
                 Con.WriteLine($"PerformPdfAsync: '{srcPdfPath}' -> '{dstPdfPath}': Already exists. Skip.");
-                return false;
+                return (false, 0);
             }
         }
 
@@ -2471,7 +2472,7 @@ public static class SuperPdfUtil
 
         Con.WriteLine($"[PerformPdfAsync]: Completed: '{srcPdfPath}' -> '{dstPdfPath}'");
 
-        return true;
+        return (true, result.PageCount);
     }
 
     static async Task<SuperPdfResult> PerformPdfMainAsync(string srcPdfPath, string dstPdfPath, SuperPerformPdfOptions? options = null, AiUtilRealEsrganEngine? sharedRealesrgan = null, CancellationToken cancel = default)
@@ -2703,6 +2704,7 @@ public static class SuperPdfUtil
         return new SuperPdfResult
         {
             PnOcrMetaData = result,
+            PageCount = pdfTotalPages,
         };
     }
 

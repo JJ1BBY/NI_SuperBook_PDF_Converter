@@ -117,6 +117,7 @@ namespace SuperBookTools.App
                 // ConsoleService.Prompt は空入力を null (キャンセル) 扱いするため、
                 // Enter = デフォルト Y を実現するには ReadLine を直接呼ぶ
                 new ConsoleParam("ocr", (svc, p) => svc.ReadLine((string?)p ?? ""), "Perform Japanese High-Quality OCR? [Y/n/e=epub-only]: ", null, null),
+                new ConsoleParam("eta", (svc, p) => svc.ReadLine((string?)p ?? ""), "Show conversion time estimate (ETA)? [Y/n]: ", null, null),
             };
             ConsoleParamValueList vl = c.ParseCommandList(cmdName, str, args);
 
@@ -132,6 +133,9 @@ namespace SuperBookTools.App
             string ocrRaw = vl["ocr"].StrValue._NonNullTrim();
             bool epubOnly = ocrRaw.StartsWith("e", StringComparison.OrdinalIgnoreCase);
             bool performOcr = !epubOnly && (ocrRaw._IsEmpty() || ocrRaw.StartsWith("y", StringComparison.OrdinalIgnoreCase));
+
+            string etaRaw = vl["eta"].StrValue._NonNullTrim();
+            bool showEta = !epubOnly && (etaRaw._IsEmpty() || etaRaw.StartsWith("y", StringComparison.OrdinalIgnoreCase));
 
             if (!epubOnly && srcDir._IsSamei(dstDir))
             {
@@ -190,32 +194,87 @@ namespace SuperBookTools.App
 
                 List<string> errorFilesList = new();
 
+                // ETA プリスキャン: 全PDFのページ数取得 + スキップ予測
+                int[] preScanPageCounts = new int[numTotal];
+                bool[] preScanWillSkip = new bool[numTotal];
+                if (showEta && numTotal > 0)
+                {
+                    $"[ETA] Pre-scanning {numTotal} files..."._Error();
+                    string optionsDigestPart = options._ObjectToJson();
+                    var prescanTasks = srcFiles.Select(async (src, idx) =>
+                    {
+                        try
+                        {
+                            int pageCount = await SuperBookExternalTools.ImageMagick.GetPdfPageCountAsync(src.FullPath);
+                            string relPath = PP.GetRelativeFileName(src.FullPath, srcDir);
+                            string dstPath = PP.Combine(dstDir, relPath);
+                            var meta = await Lfs.GetFileMetadataAsync(src.FullPath);
+                            string digest = $"{meta.LastWriteTime!.Value.Ticks} {meta.Size} {optionsDigestPart}"._Digest();
+                            bool willSkip = await Lfs.IsOkFileExistsAsync(dstPath, digest);
+                            return (pageCount, willSkip, idx);
+                        }
+                        catch
+                        {
+                            return (0, false, idx);
+                        }
+                    }).ToList();
+                    var prescanResults = await Task.WhenAll(prescanTasks);
+                    foreach (var (pageCount, willSkip, idx) in prescanResults)
+                    {
+                        preScanPageCounts[idx] = pageCount;
+                        preScanWillSkip[idx] = willSkip;
+                    }
+                    int predictedSkip = preScanWillSkip.Count(x => x);
+                    int predictedProcess = numTotal - predictedSkip;
+                    int pagesToProcess = prescanResults.Where(r => !r.willSkip).Sum(r => r.pageCount);
+                    $"[ETA] Pre-scan done: {numTotal} files ({predictedSkip} already done, {predictedProcess} to process, {pagesToProcess} pages)"._Error();
+                }
+
+                double fallbackSecsPerPage = performOcr ? 15.0 : 5.0;
+                var eta = new ConvertPdfEtaTracker(preScanPageCounts, preScanWillSkip, fallbackSecsPerPage);
+
                 // RealESRGAN サーバーを全PDFで共有してモデルロードを1回にする
                 await using var sharedRealesrgan = new AiUtilRealEsrganEngine(SuperBookExternalTools.Settings);
 
-                foreach (var src in srcFiles)
+                foreach (var (src, idx) in srcFiles.Select((s, i) => (s, i)))
                 {
                     currentNumber++;
                     string relativePath = PP.GetRelativeFileName(src.FullPath, srcDir);
                     string dstPath = PP.Combine(dstDir, relativePath);
+                    int thisFilePages = preScanPageCounts[idx];
 
-                    $"<< {currentNumber} / {numTotal} >> '{src.FullPath}' Start"._Error();
+                    string startSuffix = showEta
+                        ? $" [{thisFilePages} pages | {eta.GetEtaString()}]"
+                        : "";
+                    $"<< {currentNumber} / {numTotal} >> '{src.FullPath}' Start{startSuffix}"._Error();
 
+                    var fileSw = Stopwatch.StartNew();
                     try
                     {
-                        if (await SuperPdfUtil.PerformPdfAsync(src.FullPath, dstPath, options, sharedRealesrgan: sharedRealesrgan) == false)
+                        var (wasProcessed, actualPageCount) = await SuperPdfUtil.PerformPdfAsync(src.FullPath, dstPath, options, sharedRealesrgan: sharedRealesrgan);
+                        fileSw.Stop();
+                        int pagesForEta = actualPageCount > 0 ? actualPageCount : thisFilePages;
+
+                        if (!wasProcessed)
                         {
                             numSkip++;
+                            if (showEta) eta.RecordCompletion(wasSkipped: true, pagesForEta, fileSw.Elapsed);
                             $"<< {currentNumber} / {numTotal} >> '{src.FullPath}' Skip"._Error();
                         }
                         else
                         {
                             numOk++;
-                            $"<< {currentNumber} / {numTotal} >> '{src.FullPath}' OK"._Error();
+                            if (showEta) eta.RecordCompletion(wasSkipped: false, pagesForEta, fileSw.Elapsed);
+                            string okSuffix = showEta
+                                ? $" [{fileSw.Elapsed:hh\\:mm\\:ss} | {eta.GetRateString()} | {eta.GetEtaString()}]"
+                                : "";
+                            $"<< {currentNumber} / {numTotal} >> '{src.FullPath}' OK{okSuffix}"._Error();
                         }
                     }
                     catch (Exception ex)
                     {
+                        fileSw.Stop();
+                        if (showEta) eta.RecordCompletion(wasSkipped: false, thisFilePages, fileSw.Elapsed);
                         Con.WriteLine($"<< {currentNumber} / {numTotal} >> Error: {src.FullPath} -> {dstPath}");
                         ex._Error();
                         errorFilesList.Add(src.FullPath);
@@ -261,5 +320,45 @@ namespace SuperBookTools.App
 
             return 0;
         }
+    }
+
+    private sealed class ConvertPdfEtaTracker
+    {
+        private long _totalPagesAccumulated;
+        private double _totalSecondsAccumulated;
+        private int _pagesRemaining;
+        private readonly double _fallbackSecsPerPage;
+
+        public ConvertPdfEtaTracker(int[] preScanPageCounts, bool[] preScanWillSkip, double fallbackSecsPerPage)
+        {
+            _fallbackSecsPerPage = fallbackSecsPerPage;
+            for (int i = 0; i < preScanPageCounts.Length; i++)
+                if (!preScanWillSkip[i]) _pagesRemaining += preScanPageCounts[i];
+        }
+
+        private double PagesPerSecond =>
+            _totalSecondsAccumulated > 0 ? _totalPagesAccumulated / _totalSecondsAccumulated : 0;
+
+        public void RecordCompletion(bool wasSkipped, int pageCount, TimeSpan elapsed)
+        {
+            _pagesRemaining = Math.Max(0, _pagesRemaining - pageCount);
+            if (!wasSkipped && pageCount > 0 && elapsed.TotalSeconds > 1.0)
+            {
+                _totalPagesAccumulated += pageCount;
+                _totalSecondsAccumulated += elapsed.TotalSeconds;
+            }
+        }
+
+        public string GetEtaString()
+        {
+            double secsPerPage = PagesPerSecond > 0 ? 1.0 / PagesPerSecond : _fallbackSecsPerPage;
+            double remainingSecs = _pagesRemaining * secsPerPage;
+            string label = PagesPerSecond > 0 ? "ETA" : "ETA~";
+            var finishAt = DateTime.Now.AddSeconds(remainingSecs);
+            return $"{label}: {TimeSpan.FromSeconds(remainingSecs):hh\\:mm\\:ss} (finish ~{finishAt:HH:mm})";
+        }
+
+        public string GetRateString() =>
+            PagesPerSecond > 0 ? $"{PagesPerSecond:F1} pg/s" : "-- pg/s";
     }
 }
